@@ -12,3 +12,5 @@ airflow.db
 *.csv
 *.parquet
 *.joblib
+data/
+jars/
