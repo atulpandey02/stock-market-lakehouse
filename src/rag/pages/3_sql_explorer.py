@@ -62,13 +62,13 @@ def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
     try:
         r = requests.post(
             f"{API_V1}/sql/query",
-            json={"query": sql, "database": database},
+            json={"sql": sql, "database": database},
             timeout=30,
         )
         r.raise_for_status()
         result = r.json()
 
-        rows = result.get("data", [])
+        rows = result.get("rows", [])
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame(rows)

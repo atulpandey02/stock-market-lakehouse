@@ -87,7 +87,7 @@ def query_intelligence(question: str, symbol: str | None = None) -> dict:
     """
     payload = {"question": question}
     if symbol and symbol != "All Stocks":
-        payload["symbol_filter"] = symbol
+        payload["symbol"] = symbol
     return api_post("/intelligence/query", payload)
 
 
@@ -305,6 +305,8 @@ if user_input and user_input.strip():
                     answer  = result.get("answer", "No answer returned")
                     chunks  = result.get("sources", [])
                     metrics = result.get("pipeline_metrics") or {}
+
+                    
 
             except Exception as e:
                 metrics = {}

@@ -14,6 +14,7 @@ import logging
 from typing import Any, List, Optional, Tuple
 from datetime import date, datetime
 
+
 import snowflake.connector
 
 from api.config import (

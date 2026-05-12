@@ -100,10 +100,10 @@ def sql_to_df(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
     Replaces the old run_query() / query_batch() / query_stream() functions.
     The API handles the Snowflake connection — Streamlit knows nothing about it.
     """
-    result = api_post("/sql/query", {"query": sql, "database": database})
+    result = api_post("/sql/query", {"sql": sql, "database": database})
     if has_error(result):
         return pd.DataFrame({"error": [result["error"]]})
-    rows = result.get("data", [])
+    rows = result.get("rows", [])
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
