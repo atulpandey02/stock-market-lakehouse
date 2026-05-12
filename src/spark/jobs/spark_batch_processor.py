@@ -35,19 +35,31 @@ def create_spark_session():
         .config("spark.executor.memory", "512m")
         .config("spark.executor.cores", "1")
         .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.jars", "/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar")
+        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        .config("spark.sql.catalog.iceberg", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.iceberg.type", "hadoop")
+        .config("spark.sql.catalog.iceberg.warehouse", "s3a://stock-market-data/iceberg")
+        .config("fs.s3a.access.key", "minioadmin")
+        .config("fs.s3a.secret.key", "minioadmin")
+        .config("fs.s3a.endpoint", "http://minio:9000")
+        .config("fs.s3a.path.style.access", "true")
+        .config("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("fs.s3a.connection.ssl.enabled", "false")
+        .config("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
         .getOrCreate())
 
     spark.sparkContext.setLogLevel("ERROR")
 
     hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
-    hadoop_conf.set("fs.s3a.access.key",        "minioadmin")
-    hadoop_conf.set("fs.s3a.secret.key",        "minioadmin")
-    hadoop_conf.set("fs.s3a.endpoint",          "http://minio:9000")
+    hadoop_conf.set("fs.s3a.access.key", "minioadmin")
+    hadoop_conf.set("fs.s3a.secret.key", "minioadmin")
+    hadoop_conf.set("fs.s3a.endpoint", "http://minio:9000")
     hadoop_conf.set("fs.s3a.path.style.access", "true")
-    hadoop_conf.set("fs.s3a.impl",              "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    hadoop_conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     hadoop_conf.set("fs.s3a.connection.ssl.enabled", "false")
-    hadoop_conf.set("fs.s3a.aws.credentials.provider",
-                    "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+    hadoop_conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+
     return spark
 
 
@@ -68,7 +80,7 @@ def main():
         )
 
         print(f"\nReading data from S3: {input_path}")
-        print(f"Writing to         : {output_path}")
+        print(f"Writing to Iceberg table: iceberg.stock_market.historical_stocks")
 
         df = (spark.read
               .option("header", "true")
@@ -103,12 +115,27 @@ def main():
             "volume", "close", "daily_return_pct", "sma_5", "sma_20"
         ).show(5)
 
+                # Create namespace if it doesn't exist
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.stock_market")
+
+        # Register temp view FIRST
+        processed_df.createOrReplaceTempView("processed_df_view")
+
+        # Create Iceberg table schema if it doesn't exist
+        spark.sql("""
+            CREATE TABLE IF NOT EXISTS iceberg.stock_market.historical_stocks
+            USING iceberg
+            PARTITIONED BY (symbol)
+            AS SELECT * FROM processed_df_view
+            WHERE 1=0
+        """)
+
+        # Write data to Iceberg table
         (processed_df
-            .coalesce(1)
-            .write
-            .mode("overwrite")
-            .partitionBy("symbol")
-            .parquet(output_path))
+            .writeTo("iceberg.stock_market.historical_stocks")
+            .using("iceberg")
+            .partitionedBy("symbol")
+            .createOrReplace())
 
         processed_df.select(
             "symbol", "date", "open", "high", "low", "close",
@@ -116,7 +143,7 @@ def main():
             "is_positive_day", "sma_5", "sma_20"
         ).orderBy("symbol", "date").show(20, truncate=False)
 
-        print(f"\nOutput written to: {output_path}")
+        print(f"\n\nOutput written to Iceberg table: iceberg.stock_market.historical_stocks")
         print("\n" + "=" * 45)
         print("BATCH PROCESSING COMPLETE")
         print("=" * 45)

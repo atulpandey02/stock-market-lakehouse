@@ -141,25 +141,33 @@ def process_data(**context):
 
     cmd = [
         "docker", "exec",
-        "stockmarketdatapipeline-spark-client-1",
+        "stockmarketdatapipeline_v2-spark-master-1",
         "/opt/spark/bin/spark-submit",
         "--master",          "spark://spark-master:7077",
         "--conf",            "spark.jars.ivy=/tmp/.ivy2",
-        "--driver-memory",   "1g",
-        "--executor-memory", "1g",
+        "--driver-memory",   "512m",
+        "--executor-memory", "512m",
         "--executor-cores",  "1",
-        "--packages",
-        "org.apache.hadoop:hadoop-aws:3.3.1,com.amazonaws:aws-java-sdk-bundle:1.11.901",
         "/opt/spark/jobs/spark_batch_processor.py",
     ]
 
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=False)
+    result = subprocess.run(cmd, capture_output=True , text = True)
+
+    # Print everything Spark said
+    if result.stdout:
+        print("SPARK STDOUT:")
+        print(result.stdout)
+    if result.stderr:
+        print("SPARK STDERR:")
+        print(result.stderr)
 
     if result.returncode == 0:
         print("✓ Spark batch processing complete")
     else:
-        raise Exception(f"Spark failed with exit code: {result.returncode}")
+        raise Exception(
+            f"Spark failed with exit code: {result.returncode}"
+        )
 
 
 # ── Task 5: Load to Snowflake ─────────────────────────────────────────────────

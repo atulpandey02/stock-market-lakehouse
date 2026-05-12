@@ -1,0 +1,16 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+
+# Keep compatible with existing rag_venv LangChain/LangGraph
+pydantic>=2.7.4,<3.0.0
+requests>=2.32.5,<3.0.0
+
+python-dotenv==1.0.1
+snowflake-connector-python==3.10.0
+
+# API code uses: from pinecone import Pinecone
+pinecone==3.2.2
+
+sentence-transformers==2.7.0
+
+cryptography==41.0.7

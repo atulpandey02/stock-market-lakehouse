@@ -147,7 +147,7 @@ def load_embedding_model():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 
-def retrieve_from_pinecone(question: str, symbol: str = None, top_k: int = 5):
+def retrieve_from_pinecone(question: str, symbol: str | None = None, top_k: int = 5):
     from pinecone import Pinecone
     model     = load_embedding_model()
     query_vec = model.encode([question])[0].tolist()

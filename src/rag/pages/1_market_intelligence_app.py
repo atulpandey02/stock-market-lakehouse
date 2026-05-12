@@ -1,17 +1,14 @@
 """
 Page 1 — Market Intelligence (RAG Chat)
+MIGRATED: All backend calls now go through FastAPI layer.
 
-What changed vs previous version:
-  + get_stock_metrics_from_snowflake()  pulls latest dbt mart data
-  + generate_with_groq()               now accepts pipeline_metrics arg
-  + system prompt                      injects BOTH news + dbt signals
-  + UI                                 shows pipeline metrics card above answer
-
-Why this matters:
-  RAG now consumes dbt STOCK_PERFORMANCE output directly.
-  The answer is grounded in both quantitative pipeline signals
-  (SMA crossovers, BUY/SELL, daily return) AND financial news.
-  The two pipelines are genuinely connected — not just co-existing.
+What changed:
+  - Removed snowflake.connector, pinecone, sentence-transformers entirely
+  - get_stock_metrics_from_snowflake() → POST /api/v1/intelligence/query
+  - retrieve_from_pinecone() + generate_with_groq() → POST /api/v1/intelligence/query
+  - render_pipeline_metrics() — unchanged UI, now receives API data
+  - get_index_stats() → GET /api/v1/health (pinecone status from health endpoint)
+  - All credentials removed from this file
 """
 
 import os
@@ -21,7 +18,7 @@ import logging
 import requests
 import streamlit as st
 from pathlib import Path
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv
 
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore")
@@ -44,6 +41,73 @@ for _parent in [
         load_dotenv(_env, override=True)
         break
 
+# ── API config ────────────────────────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_V1       = f"{API_BASE_URL}/api/v1"
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+
+def api_get(path: str, params: dict |None = None) -> dict:
+    try:
+        r = requests.get(f"{API_V1}{path}", params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Cannot connect to API at {API_BASE_URL}. Is it running?"}
+    except requests.exceptions.Timeout:
+        return {"error": "API timed out after 15s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def api_post(path: str, payload: dict) -> dict:
+    try:
+        r = requests.post(f"{API_V1}{path}", json=payload, timeout=45)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Cannot connect to API at {API_BASE_URL}. Is it running?"}
+    except requests.exceptions.Timeout:
+        return {"error": "API timed out — Groq may be slow, try again"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Data functions ────────────────────────────────────────────────────────────
+
+def query_intelligence(question: str, symbol: str | None = None) -> dict:
+    """
+    Single API call replacing:
+      - get_stock_metrics_from_snowflake()
+      - retrieve_from_pinecone()
+      - generate_with_groq()
+
+    Returns: { answer, sources, pipeline_metrics }
+    """
+    payload = {"question": question}
+    if symbol and symbol != "All Stocks":
+        payload["symbol_filter"] = symbol
+    return api_post("/intelligence/query", payload)
+
+
+def get_index_stats() -> dict:
+    """
+    Previously connected directly to Pinecone.
+    Now reads from the health endpoint.
+    """
+    result = api_get("/health")
+    if "error" in result:
+        return {"total_vectors": 0, "dimension": 384, "status": f"Error: {result['error']}"}
+    services = result.get("services", [])
+    for svc in services:
+        if svc.get("name") == "pinecone":
+            if svc.get("status") == "ok":
+                return {"total_vectors": "N/A", "dimension": 384, "status": "Connected ✓"}
+            else:
+                return {"total_vectors": 0, "dimension": 384, "status": f"Error: {svc.get('message')}"}
+    return {"total_vectors": 0, "dimension": 384, "status": "Unknown"}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -61,260 +125,24 @@ def safe_date(val) -> str:
     return s[:10] if s else "N/A"
 
 
-# ── NEW: Snowflake — Pull dbt STOCK_PERFORMANCE data ─────────────────────────
-
-def get_stock_metrics_from_snowflake(symbol: str) -> dict:
-    """
-    Query the dbt STOCK_PERFORMANCE mart for a given stock.
-
-    This is the key connection between the data engineering pipeline
-    and the RAG intelligence layer. The STOCK_PERFORMANCE table only
-    exists because the full pipeline ran:
-      Finnhub → Kafka → MinIO → Spark → Snowflake → dbt run
-
-    Returns a dict with all metrics, or empty dict on failure.
-    """
-    try:
-        import snowflake.connector
-
-        conn = snowflake.connector.connect(
-            account   = os.getenv("SNOWFLAKE_ACCOUNT"),
-            user      = os.getenv("SNOWFLAKE_USER"),
-            password  = os.getenv("SNOWFLAKE_PASSWORD"),
-            role      = os.getenv("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
-            warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-            database  = "STOCKMARKETBATCH",
-            schema    = "PUBLIC",
-        )
-        cur = conn.cursor()
-        cur.execute(f"""
-            SELECT
-                TRADE_DATE,
-                ROUND(CLOSE_PRICE,      2) AS CLOSE,
-                ROUND(SMA_5,            2) AS SMA_5,
-                ROUND(SMA_20,           2) AS SMA_20,
-                ROUND(DAILY_RETURN_PCT, 2) AS RETURN_PCT,
-                OVERALL_SIGNAL,
-                SMA_SIGNAL
-            FROM STOCKMARKETBATCH.PUBLIC.STOCK_PERFORMANCE
-            WHERE SYMBOL = '{symbol.upper()}'
-            ORDER BY TRADE_DATE DESC
-            LIMIT 1
-        """)
-        row  = cur.fetchone()
-        cols = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
-
-        if row:
-            return dict(zip(cols, row))
-        return {}
-
-    except Exception as e:
-        # Gracefully degrade — if Snowflake is unavailable RAG still works
-        # just without the pipeline data context
-        return {"error": str(e)}
-
-
-def format_metrics_for_prompt(metrics: dict, symbol: str) -> str:
-    """
-    Format dbt metrics into a clean string for injection into Groq prompt.
-    """
-    if not metrics or "error" in metrics:
-        return ""
-
-    signal    = safe_str(metrics.get("OVERALL_SIGNAL"), "N/A")
-    sma_sig   = safe_str(metrics.get("SMA_SIGNAL"),     "N/A")
-    close     = safe_float(metrics.get("CLOSE"),        0.0)
-    sma5      = safe_float(metrics.get("SMA_5"),        0.0)
-    sma20     = safe_float(metrics.get("SMA_20"),       0.0)
-    ret_pct   = safe_float(metrics.get("RETURN_PCT"),   0.0)
-    date      = safe_str(metrics.get("TRADE_DATE"),     "N/A")
-
-    return f"""
-=== QUANTITATIVE PIPELINE DATA for {symbol.upper()} (as of {date}) ===
-Close Price    : ${close}
-SMA-5          : ${sma5}   (5-day moving average)
-SMA-20         : ${sma20}  (20-day moving average)
-Daily Return   : {ret_pct}%
-SMA Signal     : {sma_sig}
-Overall Signal : {signal}
-Data source    : dbt STOCK_PERFORMANCE mart (Snowflake)
-=== END PIPELINE DATA ===
-"""
-
-
-# ── Backend — Embedding ───────────────────────────────────────────────────────
-
-@st.cache_resource(show_spinner="Loading embedding model...")
-def load_embedding_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-
-
-# ── Backend — Pinecone Retrieval ──────────────────────────────────────────────
-
-def retrieve_from_pinecone(question: str, symbol: str = None, top_k: int = 5):
-    from pinecone import Pinecone
-
-    model     = load_embedding_model()
-    query_vec = model.encode([question])[0].tolist()
-
-    pc    = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-    index = pc.Index(os.getenv("PINECONE_INDEX_NAME", "stock-market-rag"))
-
-    params = {"vector": query_vec, "top_k": top_k, "include_metadata": True}
-    if symbol and symbol != "All Stocks":
-        params["filter"] = {"symbol": symbol.upper()}
-
-    results = index.query(**params)
-
-    seen, unique = set(), []
-    for m in results.get("matches", []):
-        meta = m.get("metadata") or {}
-        url  = safe_str(meta.get("url"))
-        if url and url not in seen:
-            seen.add(url)
-            unique.append({
-                "title":        safe_str(meta.get("title"),        "N/A"),
-                "summary":      safe_str(meta.get("summary"),      ""),
-                "symbol":       safe_str(meta.get("symbol"),       ""),
-                "source":       safe_str(meta.get("source"),       ""),
-                "url":          url,
-                "published_at": safe_str(meta.get("published_at"), ""),
-                "sentiment":    safe_str(meta.get("sentiment"),    "Neutral"),
-                "score":        safe_float(m.get("score"),         0.0),
-            })
-    return unique
-
-
-# ── Backend — Groq LLM (UPDATED — now receives pipeline metrics) ──────────────
-
-def generate_with_groq(
-    question:         str,
-    chunks:           list,
-    pipeline_metrics: str = ""   # ← NEW: dbt STOCK_PERFORMANCE data
-) -> str:
-    """
-    Calls Groq with BOTH quantitative pipeline data AND news chunks.
-
-    The system prompt now has two information sources:
-      1. pipeline_metrics  — from dbt STOCK_PERFORMANCE (Snowflake)
-      2. news context      — from Pinecone semantic search
-
-    This grounds the answer in your actual pipeline output, not just news.
-    If pipeline metrics are unavailable (Snowflake down), falls back
-    gracefully to news-only mode — same as before.
-    """
-    groq_key = os.getenv("GROQ_API_KEY")
-    if not groq_key:
-        return "⚠️ GROQ_API_KEY is missing — check your .env file."
-    if not chunks and not pipeline_metrics:
-        return "⚠️ No data available — check Pinecone index and Snowflake connection."
-
-    # Build news context from Pinecone chunks
-    news_context = "\n\n".join([
-        f"[{c['symbol']}] {c['title']}\n"
-        f"Published: {safe_date(c['published_at'])} | Source: {c['source']}\n"
-        f"Sentiment: {c['sentiment']}\n"
-        f"Summary: {c['summary']}"
-        for c in chunks
-    ]) if chunks else "No news articles retrieved."
-
-    # ── System prompt — combines both data sources ─────────────────────────
-    if pipeline_metrics:
-        system_prompt = """You are a professional financial market analyst with access to \
-two data sources:
-1. Quantitative signals computed by a real-time data pipeline (Spark + dbt transformations)
-2. Recent financial news articles retrieved from a vector database
-
-Your job is to synthesise BOTH sources into a coherent analysis.
-Rules:
-- Always reference the pipeline signal (BULLISH/BEARISH/NEUTRAL) explicitly
-- If the pipeline signal conflicts with news sentiment, flag this clearly
-- If SMA-5 > SMA-20, mention this is a bullish crossover signal
-- If SMA-5 < SMA-20, mention this is a bearish crossover signal
-- Be concise — 4-6 sentences
-- Do not use external knowledge beyond what is provided"""
-    else:
-        # Fallback — Snowflake unavailable, news-only mode
-        system_prompt = """You are a professional financial market analyst.
-Answer questions using ONLY the provided news articles.
-Be concise (3-5 sentences). Cite sources where relevant.
-Do not use external knowledge."""
-
-    # ── User message — injects both data sources ───────────────────────────
-    user_content = ""
-    if pipeline_metrics:
-        user_content += f"QUANTITATIVE PIPELINE DATA:\n{pipeline_metrics}\n\n"
-    user_content += f"RECENT NEWS ARTICLES:\n{news_context}\n\n"
-    user_content += f"Question: {question}\n\nAnalysis:"
-
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_key}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_content},
-                ],
-                "temperature": 0.1,
-                "max_tokens":  600,
-            },
-            timeout=30,
-        )
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"].strip()
-        return f"⚠️ Groq API error {response.status_code}: {response.text[:300]}"
-    except requests.exceptions.Timeout:
-        return "⚠️ Groq API timed out — try again."
-    except Exception as e:
-        return f"⚠️ Error: {str(e)}"
-
-
-# ── Backend — Pinecone Stats ──────────────────────────────────────────────────
-
-def get_index_stats():
-    try:
-        from pinecone import Pinecone
-        pc    = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        index = pc.Index(os.getenv("PINECONE_INDEX_NAME", "stock-market-rag"))
-        stats = index.describe_index_stats()
-        return {
-            "total_vectors": stats.total_vector_count or 0,
-            "dimension":     stats.dimension or 384,
-            "status":        "Connected ✓"
-        }
-    except Exception as e:
-        return {"total_vectors": 0, "dimension": 384, "status": f"Error: {e}"}
-
-
-# ── NEW: Render pipeline metrics card ─────────────────────────────────────────
+# ── UI — render pipeline metrics card ────────────────────────────────────────
 
 def render_pipeline_metrics(metrics: dict, symbol: str):
-    """
-    Show a compact metrics card pulled from the dbt mart.
-    This makes the pipeline connection visible in the UI.
-    """
     if not metrics or "error" in metrics:
         return
 
-    signal  = safe_str(metrics.get("OVERALL_SIGNAL"), "N/A")
-    close   = safe_float(metrics.get("CLOSE"),        0.0)
-    sma5    = safe_float(metrics.get("SMA_5"),        0.0)
-    sma20   = safe_float(metrics.get("SMA_20"),       0.0)
-    ret_pct = safe_float(metrics.get("RETURN_PCT"),   0.0)
-    date    = safe_str(metrics.get("TRADE_DATE"),     "")
+    # API returns lowercase keys — handle both old (uppercase) and new (lowercase)
+    signal  = safe_str(metrics.get("overall_signal") or metrics.get("OVERALL_SIGNAL"), "N/A")
+    close   = safe_float(metrics.get("close_price")  or metrics.get("CLOSE"),          0.0)
+    sma5    = safe_float(metrics.get("sma_5")         or metrics.get("SMA_5"),          0.0)
+    sma20   = safe_float(metrics.get("sma_20")        or metrics.get("SMA_20"),         0.0)
+    ret_pct = safe_float(metrics.get("daily_return_pct") or metrics.get("RETURN_PCT"),  0.0)
+    date    = safe_str(metrics.get("trade_date")      or metrics.get("TRADE_DATE"),     "")
 
     signal_color = (
-    "🟢" if signal.upper() in ("BULLISH", "BUY")  else
-    "🔴" if signal.upper() in ("BEARISH", "SELL") else
-    "🟡"
+        "🟢" if signal.upper() in ("BULLISH", "BUY")  else
+        "🔴" if signal.upper() in ("BEARISH", "SELL") else
+        "🟡"
     )
 
     with st.expander(
@@ -322,19 +150,15 @@ def render_pipeline_metrics(metrics: dict, symbol: str):
         expanded=True
     ):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Close",     f"${close}")
-        c2.metric("SMA-5",     f"${sma5}")
-        c3.metric("SMA-20",    f"${sma20}")
-        c4.metric("Return",    f"{ret_pct}%",
-                  delta=f"{ret_pct}%",
-                  delta_color="normal")
+        c1.metric("Close",  f"${close}")
+        c2.metric("SMA-5",  f"${sma5}")
+        c3.metric("SMA-20", f"${sma20}")
+        c4.metric("Return", f"{ret_pct}%", delta=f"{ret_pct}%", delta_color="normal")
         st.caption(
             f"Source: Snowflake → dbt STOCK_PERFORMANCE mart · "
-            f"As of: {str(date)[:10]}"
+            f"Via FastAPI · As of: {str(date)[:10]}"
         )
 
-
-# ── Helper — render sources ───────────────────────────────────────────────────
 
 def render_sources(chunks: list):
     if not chunks:
@@ -390,16 +214,16 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Data sources")
-    st.caption("📊 Pipeline: Snowflake dbt mart")
-    st.caption("📰 News: Finnhub API → Pinecone")
-    st.caption("🔢 Embeddings: all-MiniLM-L6-v2")
-    st.caption("🧠 LLM: Groq llama-3.3-70b-versatile")
+    st.caption("📊 Pipeline: FastAPI → Snowflake → dbt")
+    st.caption("📰 News: FastAPI → Pinecone")
+    st.caption("🧠 LLM: FastAPI → Groq llama-3.3-70b-versatile")
+    st.caption(f"🔌 API: `{API_BASE_URL}`")
 
     st.divider()
     if st.button("Check Pinecone status", use_container_width=True):
         with st.spinner("Checking..."):
             stats = get_index_stats()
-        st.metric("Vectors stored", f"{stats['total_vectors']:,}")
+        st.metric("Vectors stored", f"{stats['total_vectors']}")
         st.caption(f"Dim: {stats['dimension']} · {stats['status']}")
 
     st.divider()
@@ -413,7 +237,7 @@ with st.sidebar:
 st.title("📈 Market Intelligence")
 st.caption(
     "Grounded in pipeline data (dbt STOCK_PERFORMANCE) "
-    "+ financial news (Pinecone) · LLM: Groq llama-3.3-70b-versatile"
+    "+ financial news (Pinecone) · Via FastAPI · LLM: Groq llama-3.3-70b-versatile"
 )
 st.write(" · ".join([f"`{t}`" for t in
     ["AAPL","MSFT","GOOGL","NVDA","TSLA","META","AMZN","JPM","INTC","V"]]))
@@ -433,7 +257,6 @@ if "quick_q" not in st.session_state:
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"],
                          avatar="🧑" if msg["role"] == "user" else "🤖"):
-        # Show pipeline metrics card if stored with message
         if msg["role"] == "assistant" and msg.get("metrics"):
             sym = msg.get("symbol", "")
             if sym and sym != "All Stocks":
@@ -457,6 +280,10 @@ if st.session_state.get("quick_q") and not user_input:
 if user_input and user_input.strip():
     question = user_input.strip()
 
+    # sym defined OUTSIDE all context managers so it's accessible
+    # to both the spinner block and the render call after it closes
+    sym = selected_stock if selected_stock != "All Stocks" else None
+
     with st.chat_message("user", avatar="🧑"):
         st.write(question)
 
@@ -468,28 +295,23 @@ if user_input and user_input.strip():
     with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("Fetching pipeline data · Searching Pinecone · Generating with Groq..."):
             try:
-                sym = selected_stock if selected_stock != "All Stocks" else None
+                result = query_intelligence(question, sym)
 
-                # ── Step 1: Get dbt metrics from Snowflake ─────────────────
-                metrics = {}
-                if sym:
-                    metrics = get_stock_metrics_from_snowflake(sym)
-
-                # ── Step 2: Semantic search Pinecone ───────────────────────
-                chunks = retrieve_from_pinecone(question, symbol=sym, top_k=5)
-
-                # ── Step 3: Format metrics for prompt ──────────────────────
-                metrics_str = format_metrics_for_prompt(metrics, sym) if sym else ""
-
-                # ── Step 4: Generate answer with BOTH data sources ─────────
-                answer = generate_with_groq(question, chunks, pipeline_metrics=metrics_str)
+                if "error" in result:
+                    answer  = f"⚠️ API error: {result['error']}"
+                    chunks  = []
+                    metrics = {}
+                else:
+                    answer  = result.get("answer", "No answer returned")
+                    chunks  = result.get("sources", [])
+                    metrics = result.get("pipeline_metrics") or {}
 
             except Exception as e:
                 metrics = {}
                 chunks  = []
                 answer  = f"⚠️ Pipeline error: {str(e)}"
 
-        # Show pipeline metrics card above the answer
+        # Outside spinner, inside chat_message — identical pattern to old working file
         if metrics and sym and sym != "All Stocks":
             render_pipeline_metrics(metrics, sym)
 
@@ -500,7 +322,7 @@ if user_input and user_input.strip():
         "role":    "assistant",
         "content": answer,
         "sources": chunks,
-        "metrics": metrics,          # store so it rerenders in chat history
+        "metrics": metrics,
         "symbol":  selected_stock,
     })
 

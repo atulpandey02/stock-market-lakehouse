@@ -172,26 +172,46 @@ def run_spark_processing(**context):
 
     cmd = [
         "docker", "exec",
-        "stockmarketdatapipeline-spark-client-1",
+        "stockmarketdatapipeline_v2-spark-master-1",
         "/opt/spark/bin/spark-submit",
         "--master", "spark://spark-master:7077",
         "--conf", "spark.jars.ivy=/tmp/.ivy2",
-        "--driver-memory", "1g",
-        "--executor-memory", "1g",
+        "--driver-memory", "512m",
+        "--executor-memory", "512m",
         "--executor-cores", "1",
-        "--packages",
-        "org.apache.hadoop:hadoop-aws:3.3.1,com.amazonaws:aws-java-sdk-bundle:1.11.901",
         "/opt/spark/jobs/spark_stream_batch_processor.py",
         utc_date,   # ✅ actual UTC today — same partition consumer wrote to
     ]
 
     print(f"Command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=False)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.stdout:
+        print("SPARK STDOUT:")
+        print(result.stdout)
+    if result.stderr:
+        print("SPARK STDERR:")
+        print(result.stderr)
 
     if result.returncode == 0:
         print("Spark processing completed successfully ✓")
     else:
         raise Exception(f"Spark processing failed with exit code: {result.returncode}")
+
+def validate_iceberg_data(**context):
+    client = get_minio_client()
+    bucket = "stock-market-data"
+    prefix = "iceberg/stock_market/realtime_stocks/data/"
+
+    objects = list(client.list_objects(bucket, prefix=prefix, recursive=True))
+    parquet_files = [o for o in objects if o.object_name.endswith('.parquet') and o.size > 0]
+
+    print(f"Found {len(parquet_files)} Iceberg parquet files")
+
+    if len(parquet_files) == 0:
+        raise Exception("No Iceberg data found — Spark job may have failed")
+
+    print("✓ Iceberg data validated")
 
 
 def load_to_snowflake(**context):
@@ -212,25 +232,26 @@ def load_to_snowflake(**context):
 
 def pipeline_summary(**context):
     """Print summary of what was processed."""
-    # ✅ Use actual UTC wall-clock date — same partition all other tasks used
     utc_date, year, month, day = get_utc_date_parts()
 
     client = get_minio_client()
     bucket = "stock-market-data"
 
+    # Raw CSV files — still at same path
     raw_prefix = f"raw/realtime/year={year}/month={month}/day={day}"
     raw_files  = [
         o for o in client.list_objects(bucket, prefix=raw_prefix, recursive=True)
         if o.object_name.endswith('.csv') and o.size > 0
     ]
 
-    proc_prefix  = f"processed/realtime/year={year}/month={month}/day={day}"
-    proc_objects = list(client.list_objects(bucket, prefix=proc_prefix, recursive=True))
-    proc_parquet = [o for o in proc_objects if o.object_name.endswith('.parquet') and o.size > 0]
+    # Iceberg data files — now lives here instead of processed/realtime/
+    iceberg_prefix  = "iceberg/stock_market/realtime_stocks/data/"
+    iceberg_objects = list(client.list_objects(bucket, prefix=iceberg_prefix, recursive=True))
+    iceberg_files   = [o for o in iceberg_objects if o.object_name.endswith('.parquet') and o.size > 0]
 
     symbol_folders = {
         part
-        for o in proc_objects
+        for o in iceberg_objects
         for part in o.object_name.split('/')
         if part.startswith('symbol=')
     }
@@ -238,16 +259,17 @@ def pipeline_summary(**context):
     print("=" * 55)
     print("  PIPELINE EXECUTION SUMMARY")
     print("=" * 55)
-    print(f"  UTC Date (wall-clock) : {utc_date}")
-    print(f"  Raw CSV files         : {len(raw_files)}")
-    print(f"  Processed parquet     : {len(proc_parquet)}")
-    print(f"  Symbols processed     : {sorted(symbol_folders)}")
+    print(f"  UTC Date (wall-clock)  : {utc_date}")
+    print(f"  Raw CSV files          : {len(raw_files)}")
+    print(f"  Iceberg parquet files  : {len(iceberg_files)}")
+    print(f"  Symbols in Iceberg     : {sorted(symbol_folders)}")
     print("=" * 55)
-    if raw_files and proc_parquet:
+    if raw_files and iceberg_files:
         print("  ✅ Pipeline completed successfully")
     else:
         print("  ⚠️  Check individual task logs")
     print("=" * 55)
+
 
 
 def final_cleanup(**context):
@@ -296,8 +318,7 @@ with DAG(
                          prefix='raw/realtime', min_files=1, poke_interval=15, timeout=300)
     t4 = PythonOperator(task_id="spark_analytics_processing", python_callable=run_spark_processing,
                         execution_timeout=timedelta(minutes=15))
-    t5 = MinIODataSensor(task_id='validate_analytics_data',   bucket_name='stock-market-data',
-                         prefix='processed/realtime', min_files=1, poke_interval=15, timeout=180)
+    t5 = PythonOperator(task_id='validate_analytics_data',python_callable=validate_iceberg_data)
     t6 = PythonOperator(task_id="load_to_snowflake",      python_callable=load_to_snowflake)
     t7 = PythonOperator(task_id="pipeline_summary",       python_callable=pipeline_summary)
     t8 = PythonOperator(task_id="final_cleanup",          python_callable=final_cleanup,

@@ -178,7 +178,7 @@ def process_batch_data(df):
     try:
         # Portfolio-friendly window sizes — works with 3-5 min of data
         window_3min = F.window("timestamp", "3 minutes", "1 minute")
-        window_5min = F.window("timestamp", "5 minutes", "2 minutes")
+        window_5min = F.window("timestamp", "5 minutes", "1 minutes")
 
         logger.info("  Computing 3-minute windows...")
         df_3min = (df

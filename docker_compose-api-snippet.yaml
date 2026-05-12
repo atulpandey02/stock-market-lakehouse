@@ -1,0 +1,23 @@
+# Add this service to your existing docker-compose.yaml
+  # Place it after the minio service, before spark-master
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: stock-market-api
+    ports:
+      - "8000:8000"
+    environment:
+      SNOWFLAKE_ACCOUNT:        "${SNOWFLAKE_ACCOUNT}"
+      SNOWFLAKE_USER:           "${SNOWFLAKE_USER}"
+      SNOWFLAKE_PASSWORD:       "${SNOWFLAKE_PASSWORD}"
+      SNOWFLAKE_DATABASE:       "${SNOWFLAKE_DATABASE}"
+      SNOWFLAKE_WAREHOUSE:      "${SNOWFLAKE_WAREHOUSE}"
+      SNOWFLAKE_STREAM_DATABASE:"${SNOWFLAKE_STREAM_DATABASE}"
+      PINECONE_API_KEY:         "${PINECONE_API_KEY}"
+      PINECONE_INDEX_NAME:      "${PINECONE_INDEX_NAME}"
+      GROQ_API_KEY:             "${GROQ_API_KEY}"
+    volumes:
+      - ./src/api:/app/api
+    restart: always

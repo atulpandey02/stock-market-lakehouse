@@ -1,10 +1,11 @@
+
 <div align="center">
 
 # Stock Market Intelligence Pipeline
 
 **A production-grade data engineering system that ingests, transforms, and analyses stock market data — then answers natural language questions about it using AI grounded in your own pipeline's output.**
 
-[![CI](https://github.com/atulpandey02/stock-market-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/atulpandey02/stock-market-data-pipeline/actions)
+[![CI](https://github.com/atulpandey02/stock-market-rag-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/atulpandey02/stock-market-rag-pipeline/actions)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apache-kafka&logoColor=white)](https://kafka.apache.org)
 [![Spark](https://img.shields.io/badge/Apache_Spark-E25A1C?style=flat-square&logo=apache-spark&logoColor=white)](https://spark.apache.org)
@@ -12,16 +13,55 @@
 [![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?style=flat-square&logo=snowflake&logoColor=white)](https://snowflake.com)
 [![dbt](https://img.shields.io/badge/dbt-FF694B?style=flat-square&logo=dbt&logoColor=white)](https://getdbt.com)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com)
+[![Pinecone](https://img.shields.io/badge/Pinecone-6EBF8B?style=flat-square&logoColor=white)](https://pinecone.io)
+[![Groq](https://img.shields.io/badge/Groq_Llama3-F55036?style=flat-square&logoColor=white)](https://groq.com)
+[![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=flat-square&logo=minio&logoColor=white)](https://min.io)
 
 <br/>
 
-**9 Docker containers · 2 Airflow DAGs · 5 dbt models · 27 data quality tests · 300+ Pinecone chunks · 10 stocks tracked**
+**9 Docker containers &nbsp;·&nbsp; 2 Airflow DAGs &nbsp;·&nbsp; 5 dbt models &nbsp;·&nbsp; 27 data quality tests &nbsp;·&nbsp; 300+ Pinecone chunks &nbsp;·&nbsp; 10 stocks tracked**
 
 <br/>
 
 > *Tracks 10 major equities — AAPL · MSFT · GOOGL · AMZN · META · TSLA · NVDA · INTC · JPM · V*
 
 </div>
+
+---
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [What Makes This Different](#what-makes-this-different)
+- [Architecture](#architecture)
+- [Pipeline in Action](#pipeline-in-action)
+- [Tech Stack](#tech-stack)
+- [Infrastructure](#infrastructure)
+- [Project Structure](#project-structure)
+- [Data Flow](#data-flow)
+- [Snowflake Schema](#snowflake-schema)
+- [dbt Quality Gates](#dbt-quality-gates)
+- [CI/CD Pipeline](#cicd-pipeline)
+- [Key Engineering Decisions](#key-engineering-decisions)
+- [Lessons Learned](#lessons-learned)
+- [Getting Started](#getting-started)
+- [Resume Bullets](#resume-bullets)
+- [Future Enhancements](#future-enhancements)
+
+---
+
+## How It Works
+
+A 6-step end-to-end flow from raw market data to AI-grounded answers:
+
+```
+1. Airflow triggers daily  →  Kafka ingests OHLCV history from Finnhub API
+2. Spark computes          →  SMA-5, SMA-20, daily returns, BUY/SELL signals
+3. Snowflake stores        →  everything via idempotent MERGE (no duplicates on retry)
+4. dbt transforms          →  raw tables into analytical marts (27 tests gate every run)
+5. Pinecone stores         →  300+ Finnhub news embeddings for semantic retrieval
+6. Groq Llama3 fuses       →  dbt quantitative signals + Pinecone news into grounded answers
+```
 
 ---
 
@@ -44,6 +84,8 @@ bullish crossover. Recent news has mixed sentiment however, with analysts
 at Evercore maintaining a $330 price target but broader market concerns
 flagged by multiple sources. The conflicting signals warrant caution..."
 ```
+
+This is also a Lambda architecture portfolio project — batch and streaming run simultaneously into two separate Snowflake databases, with a custom `MinIODataSensor` validating data landing before Spark ever runs.
 
 ---
 
@@ -104,7 +146,7 @@ The system runs two parallel pipelines that converge at the intelligence layer:
   <table>
     <tr>
       <td align="center" width="50%">
-        <img src="docs/image/Lineage_Graph.png" width="100%" alt="dbt Lineage Graph"/>
+        <img src="docs/image/Lineage Graph.png" width="100%" alt="dbt Lineage Graph"/>
         <br/><sub><b>dbt — model lineage and 27 passing tests</b></sub>
       </td>
       <td align="center" width="50%">
@@ -121,7 +163,7 @@ The system runs two parallel pipelines that converge at the intelligence layer:
 
 | Layer | Technology |
 |---|---|
-| Message broker | Apache Kafka — dual topics (batch + realtime) |
+| Message broker | Apache Kafka — dual topics (`batch-stock-data` + `realtime-stock-data`) |
 | Data lake | MinIO — Hive-partitioned `year=/month=/day=/symbol=` |
 | Processing | Apache Spark 3.5.1 — batch transforms + windowed aggregations |
 | Warehouse | Snowflake — two databases, incremental MERGE loading |
@@ -133,6 +175,30 @@ The system runs two parallel pipelines that converge at the intelligence layer:
 | UI | Streamlit — 3-page dashboard (RAG chat, pipeline monitor, SQL explorer) |
 | Infrastructure | Docker Compose — 9 containerised services |
 | CI/CD | GitHub Actions — syntax checks, unit tests, dbt validation |
+
+---
+
+## Infrastructure
+
+### Docker Services (9 containers)
+
+| Service | Role |
+|---|---|
+| `zookeeper` | Kafka cluster coordination |
+| `kafka` | Message broker — batch and realtime topics |
+| `spark-master` | Spark cluster manager |
+| `spark-worker-1` / `spark-worker-2` | Distributed compute nodes |
+| `airflow-webserver` | DAG UI at localhost:8080 |
+| `airflow-scheduler` | DAG trigger and task queue |
+| `minio` | S3-compatible data lake at localhost:9001 |
+| `postgres` | Airflow metadata database |
+
+### Kafka Topics
+
+| Topic | Producer | Consumer | Destination |
+|---|---|---|---|
+| `batch-stock-data` | `batch_data_producer.py` | `batch_data_consumer.py` | `MinIO raw/historical/` |
+| `realtime-stock-data` | `stream_data_producer.py` | `realtime_data_consumer.py` | `MinIO raw/realtime/` |
 
 ---
 
@@ -271,6 +337,20 @@ assert_expected_symbols    → exactly 10 stocks, no drift
 
 ---
 
+## CI/CD Pipeline
+
+Five jobs run on every push to `main` or `develop` via GitHub Actions:
+
+| Job | What it checks |
+|---|---|
+| Python Syntax Check | All `.py` files in `src/` parse without errors |
+| Unit Tests | RAG pipeline logic — no Kafka, MinIO, or Snowflake needed |
+| dbt Structure Validation | All required model and test files exist, `dbt parse` validates SQL |
+| Airflow DAG Validation | Both DAGs import cleanly with dummy env vars |
+| Project Structure Check | All expected files present, `.env` not committed |
+
+---
+
 ## Key Engineering Decisions
 
 **Why MERGE instead of INSERT?**
@@ -307,6 +387,8 @@ Different update patterns and SLAs. Batch loads once daily with full MERGE seman
 
 ## Getting Started
 
+> Full setup takes approximately 15–20 minutes including Docker pulling all images.
+
 ### Prerequisites
 
 All external services below have free tiers — no credit card required for Finnhub, Pinecone, or Groq.
@@ -337,8 +419,8 @@ Copy `.env.example` to `.env` and fill in the following:
 
 ```bash
 # 1. Clone
-git clone https://github.com/atulpandey02/stock-market-data-pipeline.git
-cd stock-market-data-pipeline
+git clone https://github.com/atulpandey02/stock-market-rag-pipeline.git
+cd stock-market-rag-pipeline
 
 # 2. Configure
 cp .env.example .env
@@ -351,16 +433,49 @@ docker-compose up -d
 # Open Airflow UI → http://localhost:8080  (admin / admin)
 # Find stock_market_batch_pipeline → click ▶ Trigger
 
-# 5. Run dbt transformations (run on your local terminal, not inside Docker)
+# 5. Set up dbt virtual environment (first time only)
+python -m venv dbt_venv
+source dbt_venv/bin/activate        # Windows: dbt_venv\Scripts\activate
+pip install dbt-core dbt-snowflake
+
+# 6. Run dbt transformations (local terminal — not inside Docker)
 cd src/dbt
 source ../../dbt_venv/bin/activate
 dbt run --profiles-dir . --project-dir .
 dbt test --profiles-dir . --project-dir .
 
-# 6. Ingest news and launch the dashboard
+# 7. Ingest news and launch the dashboard
 cd src/rag
 python rag_pipeline.py     # fetches Finnhub news and loads into Pinecone (~2 min)
 streamlit run app.py       # opens dashboard at http://localhost:8501
+```
+
+---
+
+## Resume Bullets
+
+```
+● Built Lambda architecture processing 10 stocks via dual Kafka topics —
+  batch pipeline ingesting 365 days of OHLCV history and a streaming
+  pipeline with 3-minute and 5-minute Spark windowed aggregations stored
+  in Snowflake.
+
+● Designed incremental Snowflake loading using MERGE with composite
+  primary keys (symbol + date) for idempotent reruns, alongside
+  Hive-style MinIO partitioning for Spark partition pruning.
+
+● Built dbt transformation layer with staging views and analytical marts
+  computing SMA-5, SMA-20, and BUY/SELL signals — backed by 27
+  automated data quality tests that fail the pipeline on bad data.
+
+● Developed RAG-powered market intelligence fetching Finnhub news,
+  embedding 300+ chunks using sentence-transformers stored in Pinecone,
+  and generating grounded answers via Groq Llama3 that explicitly flags
+  conflicts between quantitative signals and news sentiment.
+
+● Orchestrated via Airflow DAGs with a custom MinIODataSensor validating
+  data landing before Spark runs. CI/CD via GitHub Actions runs 5 jobs
+  including syntax checks, unit tests, and dbt parse on every push.
 ```
 
 ---
@@ -378,6 +493,8 @@ streamlit run app.py       # opens dashboard at http://localhost:8501
 
 **Atul Kumar Pandey**
 
-[GitHub](https://github.com/atulpandey02) · [LinkedIn](https://linkedin.com/in/atulkumarpandey)
+[GitHub](https://github.com/atulpandey02) &nbsp;·&nbsp; [LinkedIn](https://www.linkedin.com/in/atulpandey02/)
+
+Released under the [MIT License](LICENSE)
 
 </div>

@@ -1,126 +1,163 @@
 """
 Page 2 — Pipeline Dashboard
-Real-time pipeline monitoring
+MIGRATED: All Snowflake calls now go through FastAPI layer.
 
-FIX: Uses Path(__file__) to find .env reliably from any working directory
-     Uses cursor.execute() not pd.read_sql() for Snowflake
+What changed:
+  - Removed snowflake.connector entirely
+  - Removed all direct DB credentials
+  - query_batch() / query_stream() replaced with API calls
+  - KPIs pulled from GET /api/v1/pipeline/kpis
+  - Price history pulled from GET /api/v1/stocks/historical
+  - Signals pulled from GET /api/v1/stocks/signals
+  - SQL queries for data quality pulled from POST /api/v1/sql/query
+
+Why this matters:
+  Streamlit is now a pure UI layer. No credentials, no DB drivers.
+  If Snowflake changes, only the API services change — not this file.
 """
 
 import os
 import warnings
 import logging
 from pathlib import Path
+from typing import Any, TypeVar
 from datetime import datetime, timezone
 
+import requests
 import streamlit as st
 import pandas as pd
+from dotenv import load_dotenv
 
 warnings.filterwarnings("ignore")
 logging.getLogger("snowflake").setLevel(logging.ERROR)
 
-# ── Load .env — walk up from THIS file until .env is found ────────────────────
-# This works regardless of what directory streamlit is run from
-from dotenv import load_dotenv
-
+# ── Load .env ─────────────────────────────────────────────────────────────────
 _this_file = Path(os.path.abspath(__file__))
 for _parent in [
-    _this_file.parent,                    # pages/
-    _this_file.parent.parent,             # src/rag/
-    _this_file.parent.parent.parent,      # src/
-    _this_file.parent.parent.parent.parent, # project root
+    _this_file.parent,
+    _this_file.parent.parent,
+    _this_file.parent.parent.parent,
+    _this_file.parent.parent.parent.parent,
 ]:
     _env = _parent / ".env"
     if _env.exists():
         load_dotenv(_env, override=True)
         break
 
-# ── Snowflake ─────────────────────────────────────────────────────────────────
-try:
-    import snowflake.connector
-    SNOWFLAKE_OK = True
-except ImportError:
-    SNOWFLAKE_OK = False
-
-SNOWFLAKE_ACCOUNT  = os.getenv("SNOWFLAKE_ACCOUNT")
-SNOWFLAKE_USER     = os.getenv("SNOWFLAKE_USER")
-SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
-SNOWFLAKE_ROLE     = os.getenv("SNOWFLAKE_ROLE",     "ACCOUNTADMIN")
-SNOWFLAKE_WH       = os.getenv("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH")
+# ── API config — single source of truth ──────────────────────────────────────
+# Change API_BASE_URL in .env to point to a different server without touching code
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_V1       = f"{API_BASE_URL}/api/v1"
 
 
-def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
+# ── API helpers ───────────────────────────────────────────────────────────────
+
+def api_get(path: str, params: dict | None = None) -> dict:
     """
-    Correct Snowflake pattern — cursor.execute() not pd.read_sql()
-    pd.read_sql() fails with snowflake.connector ('NoneType' has no attribute 'find')
+    GET request to FastAPI. Returns parsed JSON or error dict.
+    All data fetching goes through here — one place to add auth headers later.
     """
-    conn = snowflake.connector.connect(
-        account   = SNOWFLAKE_ACCOUNT,
-        user      = SNOWFLAKE_USER,
-        password  = SNOWFLAKE_PASSWORD,
-        role      = SNOWFLAKE_ROLE,
-        warehouse = SNOWFLAKE_WH,
-        database  = database,
-        schema    = "PUBLIC",
-    )
-    cur  = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    cols = [desc[0] for desc in cur.description]
-    cur.close()
-    conn.close()
-    return pd.DataFrame(rows, columns=cols)
+    try:
+        r = requests.get(f"{API_V1}{path}", params=params, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Cannot connect to API at {API_BASE_URL}. Is it running?"}
+    except requests.exceptions.Timeout:
+        return {"error": "API request timed out after 15s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def api_post(path: str, payload: dict) -> dict:
+    """
+    POST request to FastAPI. Used for SQL queries.
+    """
+    try:
+        r = requests.post(f"{API_V1}{path}", json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Cannot connect to API at {API_BASE_URL}. Is it running?"}
+    except requests.exceptions.Timeout:
+        return {"error": "API request timed out after 15s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def has_error(data) -> bool:
+    """Check if API response or DataFrame has an error."""
+    if isinstance(data, dict):
+        return "error" in data
+    if isinstance(data, pd.DataFrame):
+        return "error" in data.columns
+    return False
+
+
+def sql_to_df(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
+    """
+    Run a SQL query via POST /api/v1/sql/query and return a DataFrame.
+    Replaces the old run_query() / query_batch() / query_stream() functions.
+    The API handles the Snowflake connection — Streamlit knows nothing about it.
+    """
+    result = api_post("/sql/query", {"query": sql, "database": database})
+    if has_error(result):
+        return pd.DataFrame({"error": [result["error"]]})
+    rows = result.get("data", [])
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def query_batch(sql: str) -> pd.DataFrame:
-    try:
-        return run_query(sql, "STOCKMARKETBATCH")
-    except Exception as e:
-        return pd.DataFrame({"error": [str(e)]})
+def cached_sql(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
+    """Cached wrapper around sql_to_df — same 30s TTL as before."""
+    return sql_to_df(sql, database)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_pipeline_kpis() -> dict:
+    """GET /api/v1/pipeline/kpis — cached 60s."""
+    return api_get("/pipeline/kpis")
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def query_stream(sql: str) -> pd.DataFrame:
-    try:
-        return run_query(sql, "STOCKMARKETSTREAM")
-    except Exception as e:
-        return pd.DataFrame({"error": [str(e)]})
+def get_historical(symbol: str, days: int) -> dict:
+    """GET /api/v1/stocks/historical — cached 30s."""
+    return api_get("/stocks/historical", {"symbol": symbol, "days": days})
 
 
-def has_error(df: pd.DataFrame) -> bool:
-    return "error" in df.columns
+@st.cache_data(ttl=300, show_spinner=False)
+def get_signals() -> dict:
+    """GET /api/v1/stocks/signals — cached 5m (signals don't change often)."""
+    return api_get("/stocks/signals")
 
 
-def safe_val(df: pd.DataFrame, col: str, default=0):
-    try:
-        if has_error(df) or df.empty:
-            return default
-        val = df[col].iloc[0]
-        return val if val is not None else default
-    except Exception:
+_T = TypeVar("_T")
+
+
+def safe_val(data: Any, key: str, default: _T) -> _T:
+    if has_error(data) or not data:
         return default
+    return data.get(key, default) or default
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
 col_title, col_time = st.columns([3, 1])
 with col_title:
     st.title("📊 Pipeline Dashboard")
-    st.caption("Kafka → Spark → Snowflake → dbt · Auto-refreshes every 30s")
+    st.caption(f"Kafka → Spark → Snowflake → dbt · Via FastAPI ({API_BASE_URL}) · Auto-refreshes every 30s")
 with col_time:
-    st.metric("Last refresh",
-              datetime.now(timezone.utc).strftime("%H:%M:%S UTC"))
+    st.metric("Last refresh", datetime.now(timezone.utc).strftime("%H:%M:%S UTC"))
 
-# ── Credential check ──────────────────────────────────────────────────────────
-if not SNOWFLAKE_OK:
-    st.error("snowflake-connector-python not installed. Run: pip install snowflake-connector-python")
-    st.stop()
-
-if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
+# ── API health check ──────────────────────────────────────────────────────────
+# Replaces the old Snowflake credential check
+health = api_get("/health")
+if has_error(health):
     st.error(
-        "Snowflake credentials not found in .env\n\n"
-        f"Looking for .env near: `{_this_file}`\n\n"
-        "Make sure your .env file has:\n"
-        "```\nSNOWFLAKE_ACCOUNT=...\nSNOWFLAKE_USER=...\nSNOWFLAKE_PASSWORD=...\n```"
+        f"**FastAPI is not reachable.**\n\n"
+        f"{health['error']}\n\n"
+        f"Start it with: `python -m uvicorn api.main:app --reload --port 8000`"
     )
     st.stop()
 
@@ -129,30 +166,29 @@ if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD]):
 st.divider()
 st.subheader("Pipeline KPIs")
 
-df_rows = query_batch("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK")
-df_sym  = query_batch("SELECT COUNT(DISTINCT SYMBOL) AS CNT FROM HISTORICAL_STOCK")
-df_date = query_batch("SELECT MAX(DATE) AS LATEST FROM HISTORICAL_STOCK")
-df_rt   = query_stream("SELECT COUNT(*) AS CNT FROM REALTIME_STOCK")
-df_pos  = query_batch("""
-    SELECT ROUND(
-        SUM(CASE WHEN IS_POSITIVE_DAY THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1
-    ) AS PCT FROM HISTORICAL_STOCK
-""")
+# Single API call replaces 5 separate Snowflake queries
+# The API aggregates everything and returns one clean response
+kpis = get_pipeline_kpis()
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Historical rows",   f"{int(safe_val(df_rows,'CNT',0)):,}",   f"{int(safe_val(df_sym,'CNT',0))} symbols")
-k2.metric("Latest batch date", str(safe_val(df_date, "LATEST", "N/A")))
-k3.metric("Realtime windows",  f"{int(safe_val(df_rt,'CNT',0)):,}",     "STOCKMARKETSTREAM")
-k4.metric("Positive days",     f"{float(safe_val(df_pos,'PCT',0)):.1f}%","all stocks all time")
-k5.metric("dbt tests",         "27 / 27",                               "all passing ✓")
+k1.metric("Historical rows",   f"{int(safe_val(kpis, 'historical_rows', 0)):,}",
+          f"{int(safe_val(kpis, 'symbol_count', 0))} symbols")
+k2.metric("Latest batch date", str(safe_val(kpis, "latest_batch_date", "N/A")))
+k3.metric("Realtime windows",  f"{int(safe_val(kpis, 'realtime_windows', 0)):,}",
+          "STOCKMARKETSTREAM")
+k4.metric("Positive days",     f"{float(safe_val(kpis, 'positive_day_pct', 0)):.1f}%",
+          "all stocks all time")
+k5.metric("dbt tests",         str(safe_val(kpis, "dbt_tests_passing", "N/A")),
+          "all passing ✓")
 
 
 # ── Section 2 — Buy/Sell Signals ──────────────────────────────────────────────
 st.divider()
 st.subheader("Buy / Sell Signals")
-st.caption("Source: dbt STOCK_PERFORMANCE mart")
+st.caption("Source: dbt STOCK_PERFORMANCE mart via FastAPI")
 
-df_perf = query_batch("""
+# Using SQL passthrough for the signals table — same query, different transport
+df_perf = cached_sql("""
     SELECT
         SYMBOL,
         TRADE_DATE,
@@ -164,7 +200,7 @@ df_perf = query_batch("""
         OVERALL_SIGNAL
     FROM STOCK_PERFORMANCE
     ORDER BY SYMBOL
-""")
+""", "STOCKMARKETBATCH")
 
 if has_error(df_perf):
     st.error(f"Could not load signals: {df_perf['error'].iloc[0]}")
@@ -186,9 +222,9 @@ else:
 # ── Section 3 — Realtime Stream ───────────────────────────────────────────────
 st.divider()
 st.subheader("Realtime Stream — Latest Window Per Symbol")
-st.caption("Source: STOCKMARKETSTREAM.PUBLIC.REALTIME_STOCK")
+st.caption("Source: STOCKMARKETSTREAM.PUBLIC.REALTIME_STOCK via FastAPI")
 
-df_rt_d = query_stream("""
+df_rt_d = cached_sql("""
     SELECT SYMBOL,
            WINDOW_START,
            ROUND(MA_15M, 2)         AS MA_15M,
@@ -200,7 +236,7 @@ df_rt_d = query_stream("""
         PARTITION BY SYMBOL ORDER BY WINDOW_START DESC
     ) = 1
     ORDER BY SYMBOL
-""")
+""", "STOCKMARKETSTREAM")
 
 if has_error(df_rt_d):
     st.error(f"Realtime error: {df_rt_d['error'].iloc[0]}")
@@ -209,13 +245,13 @@ elif df_rt_d.empty:
 else:
     cols = st.columns(5)
     for i, (_, r) in enumerate(df_rt_d.iterrows()):
-        ma15  = float(r["MA_15M"] or 0)
-        ma1h  = float(r["MA_1H"]  or 0)
+        ma15  = float(r.get("MA_15M") or 0)
+        ma1h  = float(r.get("MA_1H")  or 0)
         diff  = ma15 - ma1h
         delta = f"+{diff:.2f}" if diff >= 0 else f"{diff:.2f}"
         with cols[i % 5]:
             st.metric(str(r["SYMBOL"]), f"${ma15:.2f}", f"{delta} vs 1h MA")
-            st.caption(f"Vol 1h: {int(r['VOLUME_SUM_1H'] or 0):,}")
+            st.caption(f"Vol 1h: {int(r.get('VOLUME_SUM_1H') or 0):,}")
 
 
 # ── Section 4 — Price Chart ───────────────────────────────────────────────────
@@ -228,31 +264,30 @@ with col_sym:
 with col_days:
     days = st.selectbox("Period", [30, 60, 90, 180, 365], index=2)
 
-df_hist = query_batch(f"""
-    SELECT DATE, CLOSE_PRICE, SMA_5, SMA_20
-    FROM HISTORICAL_STOCK
-    WHERE SYMBOL = '{sym}'
-    ORDER BY DATE DESC
-    LIMIT {days}
-""")
+# Uses the dedicated historical endpoint — optimized, cached at API level
+hist = get_historical(sym, days)
 
-if has_error(df_hist):
-    st.error(df_hist["error"].iloc[0])
-elif not df_hist.empty:
-    st.line_chart(df_hist.sort_values("DATE").set_index("DATE")[["CLOSE_PRICE","SMA_5","SMA_20"]],
-                  use_container_width=True)
+if has_error(hist):
+    st.error(hist["error"])
+elif hist.get("data"):
+    df_hist = pd.DataFrame(hist["data"])
+    if not df_hist.empty:
+        st.line_chart(
+            df_hist.sort_values("date").set_index("date")[["close_price", "sma_5", "sma_20"]],
+            use_container_width=True,
+        )
 
 
 # ── Section 5 — Top Movers ────────────────────────────────────────────────────
 st.divider()
 st.subheader("Top Movers — Latest Day")
 
-df_mv = query_batch("""
+df_mv = cached_sql("""
     SELECT SYMBOL, CLOSE_PRICE, DAILY_RETURN_PCT
     FROM HISTORICAL_STOCK
     QUALIFY ROW_NUMBER() OVER (PARTITION BY SYMBOL ORDER BY DATE DESC) = 1
     ORDER BY DAILY_RETURN_PCT DESC
-""")
+""", "STOCKMARKETBATCH")
 
 if not has_error(df_mv) and not df_mv.empty:
     col_up, col_dn = st.columns(2)
@@ -271,25 +306,34 @@ if not has_error(df_mv) and not df_mv.empty:
 # ── Section 6 — Data Quality ──────────────────────────────────────────────────
 st.divider()
 st.subheader("Data Quality Checks")
-st.caption("Live checks against Snowflake on every refresh")
+st.caption("Live checks via FastAPI SQL passthrough — no direct DB connection")
 
-df_hl   = query_batch("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE HIGH_PRICE < LOW_PRICE")
-df_neg  = query_batch("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE CLOSE_PRICE < 0")
-df_null = query_batch("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE SYMBOL IS NULL")
-df_symc = query_batch("SELECT COUNT(DISTINCT SYMBOL) AS CNT FROM HISTORICAL_STOCK")
+df_hl   = cached_sql("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE HIGH_PRICE < LOW_PRICE")
+df_neg  = cached_sql("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE CLOSE_PRICE < 0")
+df_null = cached_sql("SELECT COUNT(*) AS CNT FROM HISTORICAL_STOCK WHERE SYMBOL IS NULL")
+df_symc = cached_sql("SELECT COUNT(DISTINCT SYMBOL) AS CNT FROM HISTORICAL_STOCK")
+
+def safe_cnt(df, default=-1):
+    try:
+        if has_error(df) or df.empty:
+            return default
+        val = df["CNT"].iloc[0]
+        return int(val) if val is not None else default
+    except Exception:
+        return default
 
 dq1, dq2, dq3, dq4 = st.columns(4)
 with dq1:
-    n = int(safe_val(df_hl, "CNT", -1))
+    n = safe_cnt(df_hl)
     st.success("✓ High >= Low\n\n0 violations") if n == 0 else st.error(f"✗ High >= Low\n\n{n} violations")
 with dq2:
-    n = int(safe_val(df_neg, "CNT", -1))
+    n = safe_cnt(df_neg)
     st.success("✓ No negative prices\n\n0 violations") if n == 0 else st.error(f"✗ Negative prices\n\n{n} found")
 with dq3:
-    n = int(safe_val(df_null, "CNT", -1))
+    n = safe_cnt(df_null)
     st.success("✓ No null symbols\n\n0 nulls") if n == 0 else st.error(f"✗ Null symbols\n\n{n} found")
 with dq4:
-    n = int(safe_val(df_symc, "CNT", 0))
+    n = safe_cnt(df_symc, 0)
     st.success(f"✓ Symbol count\n\n{n} / 10 loaded") if n == 10 else st.warning(f"⚠ Symbol count\n\n{n} / 10 loaded")
 
 
@@ -297,7 +341,7 @@ with dq4:
 st.divider()
 col_info, col_btn = st.columns([3, 1])
 with col_info:
-    st.caption("Cached 30 seconds · Click to force refresh")
+    st.caption(f"Cached 30s · API: {API_BASE_URL} · Click to force refresh")
 with col_btn:
     if st.button("Refresh now", use_container_width=True):
         st.cache_data.clear()

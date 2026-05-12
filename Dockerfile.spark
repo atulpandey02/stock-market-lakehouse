@@ -1,0 +1,6 @@
+FROM apache/spark:3.5.1-python3
+USER root
+COPY jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar /opt/spark/jars/
+COPY jars/hadoop-aws-3.3.4.jar /opt/spark/jars/
+COPY jars/aws-java-sdk-bundle-1.12.262.jar /opt/spark/jars/
+USER spark

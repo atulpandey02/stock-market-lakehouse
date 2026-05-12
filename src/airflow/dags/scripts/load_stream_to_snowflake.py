@@ -145,20 +145,17 @@ def create_snowflake_table(conn):
 
 def read_analytics_data(s3_client, year: str, month: str, day: str):
     """
-    Read processed realtime parquet files from MinIO.
-
-    ✅ FIX 4: Use year/month/day from {{ ds }} not datetime.now()
-    ✅ FIX 5: Path matches spark_stream_batch_processor.py output path
+    Read processed realtime data from Iceberg table in MinIO.
+    Iceberg stores data as Parquet files under:
+    iceberg/stock_market/realtime_stocks/data/
     """
     logger.info(MINI_SEP)
-    logger.info("  READING PROCESSED REALTIME DATA FROM MINIO")
+    logger.info("  READING PROCESSED REALTIME DATA FROM ICEBERG (MinIO)")
     logger.info(MINI_SEP)
 
-    s3_prefix = (
-        f"processed/realtime/"
-        f"year={year}/month={month}/day={day}/"
-    )
+    s3_prefix = "iceberg/stock_market/realtime_stocks/data/"
     logger.info(f"  Path   : s3://{S3_BUCKET}/{s3_prefix}")
+    logger.info(f"  Filter : date = {year}-{month}-{day}")
 
     try:
         response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
@@ -173,11 +170,16 @@ def read_analytics_data(s3_client, year: str, month: str, day: str):
         ]
         logger.info(f"  Files  : {len(parquet_files)} parquet files found")
 
+        if not parquet_files:
+            logger.warning("  No parquet files found in Iceberg data directory")
+            return None
+
         dfs = []
+        target_date = f"{year}-{month}-{day}"
+
         for obj in parquet_files:
             key = obj['Key']
             try:
-                # Extract symbol from path e.g. symbol=AAPL
                 symbol = None
                 for part in key.split("/"):
                     if part.startswith("symbol="):
@@ -190,39 +192,42 @@ def read_analytics_data(s3_client, year: str, month: str, day: str):
                 if "symbol" not in df.columns and symbol:
                     df['symbol'] = symbol
 
-                logger.info(f"  ✓ {key} → {len(df)} rows, cols: {df.columns.tolist()}")
-                dfs.append(df)
+                # Filter to today's data only using window_start date
+                if 'window_start' in df.columns:
+                    df['window_start'] = pd.to_datetime(df['window_start'])
+                    today = pd.to_datetime(target_date).date()
+                    df = df[df['window_start'].dt.date == today]
+
+                if len(df) > 0:
+                    dfs.append(df)
+                    logger.info(f"  ✓ {symbol}: {len(df)} rows for {target_date}")
 
             except Exception as e:
                 logger.error(f"  Failed to read {key}: {e}")
                 continue
 
         if not dfs:
-            logger.warning("  No valid parquet files read")
+            logger.warning(f"  No data found for date = {target_date}")
             return None
 
         combined = pd.concat(dfs, ignore_index=True)
         logger.info(f"  Total  : {len(combined)} rows across all symbols")
 
-        # ── Clean and prepare ─────────────────────────────────────────
         # Add batch_id if missing
         if 'batch_id' not in combined.columns:
             combined['batch_id'] = f"batch_{year}{month}{day}"
 
-        # Convert timestamp columns
-        for col in ['window_start', 'window_3m_end', 'window_5m_end']:
+        # Fix column names — match Iceberg table schema
+        for col in ['window_start', 'window_15m_end', 'window_1h_end']:
             if col in combined.columns:
                 combined[col] = pd.to_datetime(combined[col])
 
-        # Ensure symbol is string
         if 'symbol' in combined.columns:
             combined['symbol'] = combined['symbol'].astype(str)
 
-        # Fill numeric NaNs
         numeric_cols = combined.select_dtypes(include=[np.number]).columns
         combined[numeric_cols] = combined[numeric_cols].fillna(0)
 
-        # Drop duplicates
         combined = combined.drop_duplicates(
             subset=['symbol', 'window_start'], keep='last'
         )
@@ -233,7 +238,7 @@ def read_analytics_data(s3_client, year: str, month: str, day: str):
         return combined
 
     except Exception as e:
-        logger.error(f"  Failed to read from MinIO: {e}")
+        logger.error(f"  Failed to read from Iceberg: {e}")
         logger.error(traceback.format_exc())
         return None
 

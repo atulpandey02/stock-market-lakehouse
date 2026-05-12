@@ -4,7 +4,7 @@
 """
 Spark Streaming Processor for Real-Time Stock Data
 Reads from MinIO raw/realtime/year=/month=/day/, computes windowed metrics,
-writes to processed/realtime.
+writes to Iceberg table: iceberg.stock_market.realtime_stocks
 """
 
 import logging
@@ -30,8 +30,11 @@ MINIO_SECRET_KEY = "minioadmin"
 MINIO_BUCKET     = "stock-market-data"
 MINIO_ENDPOINT   = "http://minio:9000"
 
-SEPARATOR     = "=" * 65
-MINI_SEP      = "-" * 65
+# Iceberg table name — separate from historical_stocks
+ICEBERG_TABLE = "iceberg.stock_market.realtime_stocks"
+
+SEPARATOR = "=" * 65
+MINI_SEP  = "-" * 65
 
 
 def get_today():
@@ -52,9 +55,20 @@ def create_spark_session():
 
     spark = (SparkSession.builder
         .appName("StockMarketStreamingProcessor")
-        .config("spark.jars.packages",
-                "org.apache.hadoop:hadoop-aws:3.3.1,"
-                "com.amazonaws:aws-java-sdk-bundle:1.11.901")
+        # ── JAR: Iceberg only — hadoop-aws is baked into the Docker image ──
+        .config("spark.jars",
+                "/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar")
+        # ── Iceberg extensions ──────────────────────────────────────────────
+        .config("spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        # ── Iceberg REST catalog ────────────────────────────────────────────
+        .config("spark.sql.catalog.iceberg",
+                "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.iceberg.type", "rest")
+        .config("spark.sql.catalog.iceberg.uri", "http://iceberg-rest:8181")
+        .config("spark.sql.catalog.iceberg.warehouse",
+                "s3://stock-market-data/iceberg")
+        # ── Streaming config ────────────────────────────────────────────────
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
         .config("spark.executor.memory", "1g")
         .config("spark.executor.cores", "2")
@@ -77,6 +91,8 @@ def create_spark_session():
     spark.sparkContext.setLogLevel("ERROR")
     logger.info("  Spark Session     : OK")
     logger.info("  MinIO Endpoint    : http://minio:9000")
+    logger.info("  Iceberg Catalog   : http://iceberg-rest:8181")
+    logger.info("  Iceberg Table     : iceberg.stock_market.realtime_stocks")
     logger.info("  Executor Memory   : 1g")
     logger.info("  Executor Cores    : 2")
     logger.info("  Shuffle Partitions: 2")
@@ -142,10 +158,37 @@ def process_streaming_data(streaming_df):
         return None
 
 
+def ensure_iceberg_table(spark):
+    """
+    Create the Iceberg namespace and table if they don't exist yet.
+    Called once before the streaming query starts.
+    Using append() means this table accumulates all micro-batches over time.
+    """
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.stock_market")
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_TABLE} (
+            symbol          STRING,
+            window_start    TIMESTAMP,
+            window_15m_end  TIMESTAMP,
+            window_1h_end   TIMESTAMP,
+            ma_15m          DOUBLE,
+            ma_1h           DOUBLE,
+            volatility_15m  DOUBLE,
+            volatility_1h   DOUBLE,
+            volume_sum_15m  LONG,
+            volume_sum_1h   LONG
+        )
+        USING iceberg
+        PARTITIONED BY (symbol)
+    """)
+    logger.info(f"  Iceberg table ready: {ICEBERG_TABLE}")
+
+
 def process_and_write_batch(df, batch_id):
     """
-    foreachBatch handler — all aggregations and joins happen here
-    since df is a batch DataFrame inside this function.
+    foreachBatch handler — runs every 60 seconds.
+    Uses .append() NOT .createOrReplace() — streaming data must accumulate,
+    not be replaced on every micro-batch.
     """
     count = df.count()
 
@@ -246,22 +289,16 @@ def process_and_write_batch(df, batch_id):
                 f"Volatility: {latest['volatility_15m']:.4f}"
             )
 
-        # ── Write to MinIO ────────────────────────────────────────────────
-        today       = get_today()
-        output_path = (
-            f"s3a://{MINIO_BUCKET}/processed/realtime/"
-            f"year={today.year}/month={today.month:02d}/day={today.day:02d}/"
-        )
-
+        # ── Write to Iceberg (append — accumulates all micro-batches) ─────
         logger.info(MINI_SEP)
-        logger.info(f"  Output Path     : {output_path}")
+        logger.info(f"  Writing to Iceberg: {ICEBERG_TABLE}")
 
-        (result.write
-               .mode("append")
-               .partitionBy("symbol")
-               .parquet(output_path))
+        (result
+            .writeTo(ICEBERG_TABLE)
+            .using("iceberg")
+            .append())
 
-        logger.info(f"  Status          : ✓ Written successfully")
+        logger.info(f"  Status          : ✓ Written successfully to Iceberg")
         logger.info(SEPARATOR)
 
     except Exception as e:
@@ -305,12 +342,15 @@ def main():
     logger.info(SEPARATOR)
     logger.info("  STOCK MARKET REAL-TIME STREAMING PROCESSOR")
     logger.info(f"  Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"  Pipeline  : Kafka → MinIO → Spark → MinIO (Parquet)")
+    logger.info(f"  Pipeline  : Kafka → MinIO → Spark → Iceberg")
     logger.info(SEPARATOR)
 
     spark = create_spark_session()
 
     try:
+        # Create Iceberg table once before streaming starts
+        ensure_iceberg_table(spark)
+
         streaming_df = read_stream_from_s3(spark)
         if streaming_df is None:
             logger.error("Failed to set up streaming read — exiting")

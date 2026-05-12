@@ -4,8 +4,8 @@
 """
 Spark Batch Processor for Real-Time Stock Data
 Reads today's raw/realtime CSVs from MinIO, computes windowed metrics,
-writes results to processed/realtime as parquet.
-Designed to be triggered by Airflow on a schedule (e.g. hourly).
+writes results to Iceberg table: iceberg.stock_market.realtime_stocks
+Triggered by Airflow after producer/consumer run for 5 minutes.
 
 Usage:
   Manual:  python spark_stream_batch_processor.py
@@ -35,6 +35,9 @@ MINIO_SECRET_KEY = "minioadmin"
 MINIO_BUCKET     = "stock-market-data"
 MINIO_ENDPOINT   = "http://minio:9000"
 
+# Iceberg table — append only, accumulates all micro-batch runs over time
+ICEBERG_TABLE = "iceberg.stock_market.realtime_stocks"
+
 SEPARATOR = "=" * 65
 MINI_SEP  = "-" * 65
 
@@ -48,13 +51,11 @@ def get_process_date():
     Returns: (year, month, day) as strings e.g. ("2026", "03", "28")
     """
     if len(sys.argv) > 1:
-        # ✅ Airflow passed {{ ds }} as argument
         date_str = sys.argv[1]
         logger.info(f"  Date Source : Airflow {{ ds }} = {date_str}")
         year, month, day = date_str.split("-")
         return year, month, day
     else:
-        # ✅ Manual run — use EST to match consumer file paths
         est   = timezone(timedelta(hours=-4))
         today = datetime.now(est)
         logger.info(f"  Date Source : Manual run (EST) = {today.strftime('%Y-%m-%d')}")
@@ -72,9 +73,19 @@ def create_spark_session():
 
     spark = (SparkSession.builder
         .appName("StockMarketRealtimeBatchProcessor")
-        .config("spark.jars.packages",
-                "org.apache.hadoop:hadoop-aws:3.3.1,"
-                "com.amazonaws:aws-java-sdk-bundle:1.11.901")
+        # ── JAR: Iceberg only — hadoop-aws is baked into the Docker image ──
+        .config("spark.jars",
+                "/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar")
+        # ── Iceberg extensions ──────────────────────────────────────────────
+        .config("spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        # ── Iceberg REST catalog ────────────────────────────────────────────
+        .config("spark.sql.catalog.iceberg",
+                "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.iceberg.type", "hadoop")
+        .config("spark.sql.catalog.iceberg.warehouse",
+                "s3a://stock-market-data/iceberg")
+        # ── Performance ─────────────────────────────────────────────────────
         .config("spark.executor.memory", "1g")
         .config("spark.executor.cores", "2")
         .config("spark.default.parallelism", "2")
@@ -97,11 +108,40 @@ def create_spark_session():
 
     logger.info("  Spark Session     : OK")
     logger.info("  MinIO Endpoint    : http://minio:9000")
+    logger.info("  Iceberg Catalog   : http://iceberg-rest:8181")
+    logger.info("  Iceberg Table     : iceberg.stock_market.realtime_stocks")
     logger.info("  Executor Memory   : 1g")
     logger.info("  Executor Cores    : 2")
     logger.info("  Shuffle Partitions: 2")
     logger.info(SEPARATOR)
     return spark
+
+
+def ensure_iceberg_table(spark):
+    """
+    Create Iceberg namespace and table if they don't exist.
+    Called once at the start of each Airflow run.
+    Uses append() — each Airflow trigger adds a new batch,
+    never replaces existing realtime data.
+    """
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.stock_market")
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {ICEBERG_TABLE} (
+            symbol          STRING,
+            window_start    TIMESTAMP,
+            window_15m_end  TIMESTAMP,
+            window_1h_end   TIMESTAMP,
+            ma_15m          DOUBLE,
+            ma_1h           DOUBLE,
+            volatility_15m  DOUBLE,
+            volatility_1h   DOUBLE,
+            volume_sum_15m  BIGINT,
+            volume_sum_1h   BIGINT
+        )
+        USING iceberg
+        PARTITIONED BY (symbol)
+    """)
+    logger.info(f"  Iceberg table ready: {ICEBERG_TABLE}")
 
 
 def define_schema():
@@ -179,7 +219,6 @@ def process_batch_data(df):
         return None
 
     try:
-        # ✅ Portfolio-friendly window sizes — works with 3-5 min of data
         window_15min = F.window("timestamp", "3 minutes",  "1 minute")
         window_1h    = F.window("timestamp", "5 minutes",  "2 minutes")
 
@@ -269,70 +308,71 @@ def process_batch_data(df):
         return None
 
 
-def write_batch_to_s3(processed_df, year, month, day):
-    log_section("WRITING PROCESSED DATA TO MINIO")
+def write_to_iceberg(processed_df):
+    """
+    Write processed realtime data to Iceberg.
+    Uses append() — every Airflow trigger adds a new batch to the table.
+    This is correct for streaming data: we never want to lose previous records.
+    """
+    log_section("WRITING PROCESSED DATA TO ICEBERG")
 
     if processed_df is None:
         logger.error("  No processed DataFrame to write")
         return False
 
-    # ✅ Use same year/month/day from get_process_date()
-    output_path = (
-        f"s3a://{MINIO_BUCKET}/processed/realtime/"
-        f"year={year}/month={month}/day={day}/"
-    )
-
-    logger.info(f"  Output Path : {output_path}")
-    logger.info(f"  Write Mode  : overwrite")
-    logger.info(f"  Partitioned : by symbol")
+    logger.info(f"  Target Table : {ICEBERG_TABLE}")
+    logger.info(f"  Write Mode   : append")
+    logger.info(f"  Partitioned  : by symbol")
 
     try:
-        (processed_df.write
-            .mode("overwrite")
-            .partitionBy("symbol")
-            .parquet(output_path))
+        (processed_df
+            .writeTo(ICEBERG_TABLE)
+            .using("iceberg")
+            .append())
 
-        logger.info(f"  Status      : ✓ Written successfully")
+        logger.info(f"  Status       : ✓ Written successfully to Iceberg")
         logger.info(SEPARATOR)
         return True
 
     except Exception as e:
-        logger.error(f"  Error writing to S3: {e}")
+        logger.error(f"  Error writing to Iceberg: {e}")
         logger.error(traceback.format_exc())
         return False
 
 
 def main():
-    # ✅ Get date once — used for both read and write paths
     year, month, day = get_process_date()
 
     log_section("STOCK MARKET REALTIME BATCH PROCESSOR")
-    logger.info(f"  Process Date: {year}-{month}-{day}")
-    logger.info(f"  Pipeline    : MinIO (raw/realtime) → Spark → MinIO (processed/realtime)")
-    logger.info(f"  Trigger     : {'Airflow' if len(sys.argv) > 1 else 'Manual'}")
+    logger.info(f"  Process Date : {year}-{month}-{day}")
+    logger.info(f"  Pipeline     : MinIO (raw/realtime) → Spark → Iceberg")
+    logger.info(f"  Trigger      : {'Airflow' if len(sys.argv) > 1 else 'Manual'}")
     logger.info(SEPARATOR)
 
     spark = create_spark_session()
 
     try:
-        # Step 1 — Read raw realtime CSVs for this date
+        # Step 1 — Ensure Iceberg table exists before writing
+        ensure_iceberg_table(spark)
+
+        # Step 2 — Read raw realtime CSVs for this date
         df = read_batch_from_s3(spark, year, month, day)
         if df is None:
             logger.warning("  No data to process — exiting cleanly")
             return
 
-        # Step 2 — Compute windowed metrics + join
+        # Step 3 — Compute windowed metrics + join
         processed_df = process_batch_data(df)
         if processed_df is None:
             logger.error("  Processing failed — exiting")
             return
 
-        # Step 3 — Write to MinIO using same date partition
-        success = write_batch_to_s3(processed_df, year, month, day)
+        # Step 4 — Write to Iceberg (append)
+        success = write_to_iceberg(processed_df)
 
         if success:
             log_section("BATCH PROCESSING COMPLETE ✓")
-            logger.info(f"  Output : s3a://{MINIO_BUCKET}/processed/realtime/year={year}/month={month}/day={day}/")
+            logger.info(f"  Output : {ICEBERG_TABLE}")
             logger.info(SEPARATOR)
         else:
             logger.error("  Failed to write processed data")

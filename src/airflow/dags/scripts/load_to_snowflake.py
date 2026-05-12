@@ -148,24 +148,25 @@ def create_snowflake_table(conn):
 
 def read_processed_data(s3_client, year: str, month: str, day: str):
     """
-    Read processed parquet files from MinIO.
-
-    ✅ FIX: correct partition path format matching Spark output:
-    processed/historical/year=2026/month=03/day=26/symbol=AAPL/part-00000.parquet
+    Read processed data from Iceberg table in MinIO.
+    Iceberg stores data as Parquet files under:
+    iceberg/stock_market/historical_stocks/data/
+    We filter by batch_date to load only today's records.
     """
     logger.info(MINI_SEP)
-    logger.info("  READING PROCESSED DATA FROM MINIO")
+    logger.info("  READING PROCESSED DATA FROM ICEBERG (MinIO)")
     logger.info(MINI_SEP)
 
-    # ✅ FIX: correct path format — year=/month=/day= not date=
-    s3_prefix = (
-        f"processed/historical/"
-        f"year={year}/month={month}/day={day}/"
-    )
+    # Iceberg data path — HadoopCatalog stores data here
+    s3_prefix = "iceberg/stock_market/historical_stocks/data/"
     logger.info(f"  Path   : s3://{S3_BUCKET}/{s3_prefix}")
+    logger.info(f"  Filter : batch_date = {year}-{month}-{day}")
 
     try:
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
+        response = s3_client.list_objects_v2(
+            Bucket=S3_BUCKET,
+            Prefix=s3_prefix
+        )
 
         if "Contents" not in response:
             logger.warning(f"  No files found at {s3_prefix}")
@@ -177,11 +178,17 @@ def read_processed_data(s3_client, year: str, month: str, day: str):
         ]
         logger.info(f"  Files  : {len(parquet_files)} parquet files found")
 
+        if not parquet_files:
+            logger.warning("  No parquet files found in Iceberg data directory")
+            return None
+
         dfs = []
+        target_date = f"{year}-{month}-{day}"
+
         for obj in parquet_files:
             key = obj['Key']
             try:
-                # Extract symbol from path e.g. symbol=AAPL
+                # Extract symbol from Iceberg partition path e.g. symbol=AAPL
                 symbol = None
                 for part in key.split("/"):
                     if part.startswith("symbol="):
@@ -194,22 +201,28 @@ def read_processed_data(s3_client, year: str, month: str, day: str):
                 if "symbol" not in df.columns and symbol:
                     df['symbol'] = symbol
 
-                dfs.append(df)
-                logger.info(f"  ✓ Read {len(df)} rows from {key}")
+                # Filter to today's batch only
+                if 'batch_date' in df.columns:
+                    df['batch_date'] = pd.to_datetime(df['batch_date']).dt.date
+                    today = pd.to_datetime(target_date).date()
+                    df = df[df['batch_date'] == today]
+
+                if len(df) > 0:
+                    dfs.append(df)
+                    logger.info(f"  ✓ {symbol}: {len(df)} rows for {target_date}")
 
             except Exception as e:
                 logger.error(f"  Failed to read {key}: {e}")
                 continue
 
         if not dfs:
-            logger.warning("  No valid parquet files read")
+            logger.warning(f"  No data found for batch_date = {target_date}")
             return None
 
         combined = pd.concat(dfs, ignore_index=True)
         logger.info(f"  Total  : {len(combined)} rows across all symbols")
 
-        # ── Column mapping ────────────────────────────────────────────
-        # ✅ FIX: map Spark output column names to Snowflake column names
+        # Column mapping — Spark → Snowflake
         column_map = {
             'open':             'open_price',
             'high':             'high_price',
@@ -225,19 +238,19 @@ def read_processed_data(s3_client, year: str, month: str, day: str):
         }
         combined = combined.rename(columns=column_map)
 
-        # ── Type casting ──────────────────────────────────────────────
+        # Type casting
         if 'date' in combined.columns:
             combined['date'] = pd.to_datetime(combined['date']).dt.date
         if 'batch_date' in combined.columns:
-            combined['batch_date'] = pd.to_datetime(combined['batch_date']).dt.date
+            combined['batch_date'] = pd.to_datetime(
+                combined['batch_date'].astype(str)
+            ).dt.date
 
-        # ✅ FIX: correct typo late_updated → last_updated
         combined['last_updated'] = datetime.now(timezone.utc)
+        combined = combined.drop_duplicates(
+            subset=['symbol', 'date'], keep='last'
+        )
 
-        # Drop duplicates — keep latest
-        combined = combined.drop_duplicates(subset=['symbol', 'date'], keep='last')
-
-        # Keep only Snowflake columns
         snowflake_cols = [
             'symbol', 'date', 'open_price', 'high_price', 'low_price',
             'close_price', 'volume', 'daily_range', 'daily_return_pct',
@@ -247,7 +260,6 @@ def read_processed_data(s3_client, year: str, month: str, day: str):
         combined  = combined[available]
 
         logger.info(f"  Final  : {len(combined)} rows, {len(available)} columns")
-        logger.info(f"  Sample :")
         for _, row in combined.head(3).iterrows():
             logger.info(
                 f"    {row['symbol']} | {row['date']} | "
@@ -258,7 +270,7 @@ def read_processed_data(s3_client, year: str, month: str, day: str):
         return combined
 
     except Exception as e:
-        logger.error(f"  Failed to read from MinIO: {e}")
+        logger.error(f"  Failed to read from Iceberg: {e}")
         logger.error(traceback.format_exc())
         return None
 

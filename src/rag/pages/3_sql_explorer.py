@@ -1,65 +1,97 @@
 """
 Page 3 — SQL Explorer
-Uses cursor.execute() instead of pd.read_sql() — correct Snowflake pattern
+MIGRATED: Snowflake connection replaced with POST /api/v1/sql/query
+
+What changed:
+  - Removed snowflake.connector entirely
+  - run_query() now calls POST /api/v1/sql/query instead of opening a DB connection
+  - Database selector still works — passed as payload to the API
+  - All presets unchanged — same SQL, different transport layer
+  - Credentials completely removed from this file
+
+Why this matters:
+  SQL Explorer is now safe to share or deploy — no credentials exposed.
+  The API validates and executes queries server-side.
+  You can add query whitelisting or rate limiting at the API level later
+  without touching this file at all.
 """
+
 import os
 import warnings
 import logging
 from pathlib import Path
 
+import requests
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv
 
 logging.getLogger("snowflake").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore")
 
-_this_dir    = os.path.dirname(os.path.abspath(__file__))
-_root_dir    = os.path.dirname(_this_dir)
-_dotenv_path = find_dotenv(usecwd=True, raise_error_if_not_found=False)
-if _dotenv_path:
-    load_dotenv(_dotenv_path, override=True)
-else:
-    for _p in [Path(_root_dir)/".env", Path(_root_dir).parent/".env",
-               Path(_root_dir).parent.parent/".env"]:
-        if _p.exists():
-            load_dotenv(_p, override=True)
-            break
+# ── Load .env ─────────────────────────────────────────────────────────────────
+_this_file = Path(os.path.abspath(__file__))
+for _parent in [
+    _this_file.parent,
+    _this_file.parent.parent,
+    _this_file.parent.parent.parent,
+    _this_file.parent.parent.parent.parent,
+]:
+    _env = _parent / ".env"
+    if _env.exists():
+        load_dotenv(_env, override=True)
+        break
 
-try:
-    import snowflake.connector
-    SNOWFLAKE_OK = True
-except ImportError:
-    SNOWFLAKE_OK = False
-
-SNOWFLAKE_ACCOUNT  = os.getenv("SNOWFLAKE_ACCOUNT")
-SNOWFLAKE_USER     = os.getenv("SNOWFLAKE_USER")
-SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
+# ── API config ────────────────────────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_V1       = f"{API_BASE_URL}/api/v1"
 
 
-def run_query(sql: str, database: str) -> pd.DataFrame:
+# ── API helper ────────────────────────────────────────────────────────────────
+
+def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
     """
-    ✅ Correct Snowflake pattern — cursor.execute() not pd.read_sql()
+    Previously: opened a snowflake.connector connection, ran cursor.execute(),
+    fetched rows, built a DataFrame manually.
+
+    Now: POST to /api/v1/sql/query with the SQL and database name.
+    The API handles the Snowflake connection — this file has zero DB knowledge.
+
+    Same return type (pd.DataFrame) so all downstream UI code is unchanged.
     """
-    conn = snowflake.connector.connect(
-        account   = SNOWFLAKE_ACCOUNT,
-        user      = SNOWFLAKE_USER,
-        password  = SNOWFLAKE_PASSWORD,
-        role      = os.getenv("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
-        warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-        database  = database,
-        schema    = "PUBLIC",
-    )
-    cur  = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    cols = [desc[0] for desc in cur.description]
-    cur.close()
-    conn.close()
-    return pd.DataFrame(rows, columns=cols)
+    try:
+        r = requests.post(
+            f"{API_V1}/sql/query",
+            json={"query": sql, "database": database},
+            timeout=30,
+        )
+        r.raise_for_status()
+        result = r.json()
+
+        rows = result.get("data", [])
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)
+
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError(
+            f"Cannot connect to API at {API_BASE_URL}. "
+            "Make sure FastAPI is running: python -m uvicorn api.main:app --reload --port 8000"
+        )
+    except requests.exceptions.Timeout:
+        raise TimeoutError("API request timed out after 30s")
+    except requests.exceptions.HTTPError as e:
+        # Surface the API's error message, not a generic HTTP error
+        try:
+            detail = r.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        raise Exception(f"API error: {detail}")
+    except Exception as e:
+        raise Exception(str(e))
 
 
-# ── Presets ───────────────────────────────────────────────────────────────────
+# ── Presets — unchanged, same SQL queries ────────────────────────────────────
 PRESETS = {
     "Top 5 by avg return": {
         "db":  "STOCKMARKETBATCH",
@@ -152,14 +184,19 @@ with st.sidebar:
     for t in ["REALTIME_STOCK","STG_REALTIME_STOCK","STOCK_REALTIME_SUMMARY"]:
         st.code(t, language=None)
 
+    st.divider()
+    st.markdown("### API")
+    st.caption(f"Endpoint: `{API_BASE_URL}`")
+    st.caption("All queries routed via FastAPI")
+    st.caption("No Snowflake credentials in Streamlit")
+
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔍 SQL Explorer")
-st.caption("Query Snowflake directly · STOCKMARKETBATCH · STOCKMARKETSTREAM")
+st.caption(
+    f"Query Snowflake via FastAPI · STOCKMARKETBATCH · STOCKMARKETSTREAM · "
+    f"API: `{API_BASE_URL}`"
+)
 st.divider()
-
-if not SNOWFLAKE_OK:
-    st.error("Run: pip install snowflake-connector-python")
-    st.stop()
 
 # ── Editor ────────────────────────────────────────────────────────────────────
 db_options  = ["STOCKMARKETBATCH","STOCKMARKETSTREAM"]
@@ -178,7 +215,7 @@ run = col_run.button("▶ Run query", type="primary", use_container_width=True)
 
 # ── Results ───────────────────────────────────────────────────────────────────
 if run and sql.strip():
-    with st.spinner("Running against Snowflake..."):
+    with st.spinner(f"Running via FastAPI → Snowflake ({db})..."):
         try:
             df = run_query(sql, db)
             st.success(f"{len(df):,} rows · {len(df.columns)} columns · {db}")
@@ -192,4 +229,7 @@ if run and sql.strip():
         except Exception as e:
             st.error(f"Query error: {str(e)}")
 else:
-    st.info("Select a preset from the sidebar or write your own SQL, then click Run query")
+    st.info(
+        "Select a preset from the sidebar or write your own SQL, then click Run query.\n\n"
+        f"Queries are executed via FastAPI at `{API_BASE_URL}` — no direct DB connection."
+    )

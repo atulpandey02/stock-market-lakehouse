@@ -1,0 +1,8 @@
+{
+  "venvPath": "/Users/atulkumarpandey/Documents/Documents - ATUL’s MacBook Air/Darshil_kafka/stockmarketdatapipeline",
+  "venv": "rag_venv",
+  "extraPaths": ["src"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic"
+}
+
