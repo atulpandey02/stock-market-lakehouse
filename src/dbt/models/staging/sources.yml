@@ -47,6 +47,9 @@ sources:
           - name: LAST_UPDATED
             description: "Timestamp of last update"
 
+      - name: RAW_INTELLIGENCE_LOGS
+        description: "BRONZE layer — raw GenAI intelligence query logs"
+
   # ── Stream Database ────────────────────────────────────────────
   - name: stream
     database: STOCKMARKETSTREAM

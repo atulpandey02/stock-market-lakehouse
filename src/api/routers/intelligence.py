@@ -13,8 +13,7 @@ Now they're in one place, testable, cacheable, and observable.
 """
 
 import logging
-from typing import Optional
-
+import time 
 from fastapi import APIRouter, HTTPException
 
 from api.models.requests import IntelligenceRequest
@@ -22,6 +21,7 @@ from api.models.responses import IntelligenceResponse
 import api.services.snowflake as sf_svc
 import api.services.pinecone_svc as pc_svc
 import api.services.groq_svc as groq_svc
+import api.services.lagging_svc as log_svc
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
@@ -58,17 +58,14 @@ Data source    : dbt STOCK_PERFORMANCE mart (Snowflake)
     description="Ask a question about stocks — grounded in pipeline data and news"
 )
 async def query_intelligence(request: IntelligenceRequest):
-    """
-    Full RAG pipeline:
-    R → Retrieve from Pinecone
-    A → Augment with dbt metrics from Snowflake
-    G → Generate with Groq
-    """
+    
+    start_time = time.time()  # ← START TIMER
+    
     try:
         symbol = request.symbol.upper() if request.symbol else None
 
         # Step 1: Get dbt metrics from Snowflake (augmentation)
-        pipeline_metrics_str = ""
+        pipeline_metrics_str  = ""
         pipeline_metrics_dict = {}
         if symbol:
             try:
@@ -76,11 +73,10 @@ async def query_intelligence(request: IntelligenceRequest):
                 if signals.data:
                     latest = signals.data[0]
                     pipeline_metrics_dict = latest.model_dump()
-                    pipeline_metrics_str = _format_metrics_for_prompt(
+                    pipeline_metrics_str  = _format_metrics_for_prompt(
                         {"data": [latest.model_dump()]}, symbol
                     )
             except Exception as e:
-                # Graceful degradation — RAG still works without dbt data
                 logger.warning(f"Could not fetch dbt metrics: {e}")
 
         # Step 2: Semantic search Pinecone (retrieval)
@@ -97,15 +93,36 @@ async def query_intelligence(request: IntelligenceRequest):
             pipeline_metrics=pipeline_metrics_str
         )
 
+        # Step 4: Calculate latency and log to BRONZE layer
+        latency_ms = int((time.time() - start_time) * 1000)
+        log_svc.log_intelligence_event(
+            question   = request.question,
+            symbol     = symbol,
+            sources    = [s.model_dump() for s in sources],
+            answer     = answer,
+            latency_ms = latency_ms,
+            top_k      = request.top_k,
+        )
+
         return IntelligenceResponse(
-            question      = request.question,
-            symbol_filter = symbol,
-            answer        = answer,
-            sources       = sources,
-            total_sources = len(sources),
-            pipeline_metrics = pipeline_metrics_dict 
+            question         = request.question,
+            symbol_filter    = symbol,
+            answer           = answer,
+            sources          = sources,
+            total_sources    = len(sources),
+            pipeline_metrics = pipeline_metrics_dict,
         )
 
     except Exception as e:
+        # Log errors too — important for monitoring
+        latency_ms = int((time.time() - start_time) * 1000)
+        log_svc.log_intelligence_event(
+            question   = request.question,
+            symbol     = symbol if 'symbol' in locals() else None,
+            sources    = [],
+            answer     = "",
+            latency_ms = latency_ms,
+            error      = str(e),
+        )
         logger.error(f"intelligence query error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
