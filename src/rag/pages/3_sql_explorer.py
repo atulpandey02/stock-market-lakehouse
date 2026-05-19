@@ -1,19 +1,17 @@
 """
 Page 3 — SQL Explorer
-MIGRATED: Snowflake connection replaced with POST /api/v1/sql/query
+UPGRADED: Natural language to SQL (NL2SQL) added.
 
-What changed:
-  - Removed snowflake.connector entirely
-  - run_query() now calls POST /api/v1/sql/query instead of opening a DB connection
-  - Database selector still works — passed as payload to the API
-  - All presets unchanged — same SQL, different transport layer
-  - Credentials completely removed from this file
+Two modes:
+1. Natural Language mode — user types plain English, Groq generates SQL
+2. Manual SQL mode — user writes SQL directly (existing behavior)
 
-Why this matters:
-  SQL Explorer is now safe to share or deploy — no credentials exposed.
-  The API validates and executes queries server-side.
-  You can add query whitelisting or rate limiting at the API level later
-  without touching this file at all.
+NL2SQL flow:
+  User question → POST /api/v1/sql/ask → Groq generates SQL
+  → Validates (SELECT only) → Executes on Snowflake → Returns results
+
+Manual SQL flow (unchanged):
+  User SQL → POST /api/v1/sql/query → Executes on Snowflake → Returns results
 """
 
 import os
@@ -47,18 +45,10 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 API_V1       = f"{API_BASE_URL}/api/v1"
 
 
-# ── API helper ────────────────────────────────────────────────────────────────
+# ── API helpers ───────────────────────────────────────────────────────────────
 
 def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
-    """
-    Previously: opened a snowflake.connector connection, ran cursor.execute(),
-    fetched rows, built a DataFrame manually.
-
-    Now: POST to /api/v1/sql/query with the SQL and database name.
-    The API handles the Snowflake connection — this file has zero DB knowledge.
-
-    Same return type (pd.DataFrame) so all downstream UI code is unchanged.
-    """
+    """Manual SQL → POST /api/v1/sql/query"""
     try:
         r = requests.post(
             f"{API_V1}/sql/query",
@@ -66,22 +56,15 @@ def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
             timeout=30,
         )
         r.raise_for_status()
-        result = r.json()
-
-        rows = result.get("rows", [])
+        rows = r.json().get("rows", [])
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame(rows)
-
     except requests.exceptions.ConnectionError:
-        raise ConnectionError(
-            f"Cannot connect to API at {API_BASE_URL}. "
-            "Make sure FastAPI is running: python -m uvicorn api.main:app --reload --port 8000"
-        )
+        raise ConnectionError(f"Cannot connect to API at {API_BASE_URL}.")
     except requests.exceptions.Timeout:
-        raise TimeoutError("API request timed out after 30s")
+        raise TimeoutError("API timed out after 30s")
     except requests.exceptions.HTTPError as e:
-        # Surface the API's error message, not a generic HTTP error
         try:
             detail = r.json().get("detail", str(e))
         except Exception:
@@ -91,7 +74,46 @@ def run_query(sql: str, database: str = "STOCKMARKETBATCH") -> pd.DataFrame:
         raise Exception(str(e))
 
 
-# ── Presets — unchanged, same SQL queries ────────────────────────────────────
+def ask_natural_language(question: str, database: str = "STOCKMARKETBATCH") -> dict:
+    """
+    Natural language → POST /api/v1/sql/ask
+    Returns full response including generated_sql and rows.
+    """
+    try:
+        r = requests.post(
+            f"{API_V1}/sql/ask",
+            json={"question": question, "database": database},
+            timeout=45,
+        )
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Cannot connect to API at {API_BASE_URL}."}
+    except requests.exceptions.Timeout:
+        return {"error": "API timed out — Groq may be slow, try again"}
+    except requests.exceptions.HTTPError as e:
+        try:
+            detail = r.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        return {"error": f"API error: {detail}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── NL2SQL example questions ──────────────────────────────────────────────────
+NL_EXAMPLES = [
+    "Show me AAPL close price for the last 30 days",
+    "Which stocks have a BUY signal right now?",
+    "Top 5 stocks by average daily return",
+    "What is TSLA's highest price ever?",
+    "Show me all stocks with positive return yesterday",
+    "Compare SMA-5 and SMA-20 for NVDA",
+    "Which stocks had the most volatile day last week?",
+    "Show me latest realtime data for all stocks",
+]
+
+# ── SQL Presets (existing behavior) ──────────────────────────────────────────
 PRESETS = {
     "Top 5 by avg return": {
         "db":  "STOCKMARKETBATCH",
@@ -167,69 +189,175 @@ ORDER BY SYMBOL;"""
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### Preset queries")
-    for name, preset in PRESETS.items():
-        if st.button(name, key=f"preset_{name}", use_container_width=True):
-            st.session_state["sql_query"] = preset["sql"]
-            st.session_state["sql_db"]    = preset["db"]
-            st.rerun()
+    st.markdown("### Mode")
+    mode = st.radio(
+        "Query mode",
+        ["Natural Language", "Manual SQL"],
+        label_visibility="collapsed"
+    )
+
+    st.divider()
+
+    if mode == "Natural Language":
+        st.markdown("### Example questions")
+        for q in NL_EXAMPLES:
+            if st.button(q, key=f"nl_{q}", use_container_width=True):
+                st.session_state["nl_question"] = q
+                st.rerun()
+
+    else:
+        st.markdown("### Preset queries")
+        for name, preset in PRESETS.items():
+            if st.button(name, key=f"preset_{name}", use_container_width=True):
+                st.session_state["sql_query"] = preset["sql"]
+                st.session_state["sql_db"]    = preset["db"]
+                st.rerun()
 
     st.divider()
     st.markdown("### Tables")
     st.caption("**STOCKMARKETBATCH**")
-    for t in ["HISTORICAL_STOCK","STG_HISTORICAL_STOCK",
-              "STOCK_DAILY_METRICS","STOCK_PERFORMANCE"]:
+    for t in ["HISTORICAL_STOCK", "STOCK_DAILY_METRICS",
+              "STOCK_PERFORMANCE"]:
         st.code(t, language=None)
     st.caption("**STOCKMARKETSTREAM**")
-    for t in ["REALTIME_STOCK","STG_REALTIME_STOCK","STOCK_REALTIME_SUMMARY"]:
+    for t in ["REALTIME_STOCK", "STG_REALTIME_STOCK"]:
         st.code(t, language=None)
 
     st.divider()
     st.markdown("### API")
     st.caption(f"Endpoint: `{API_BASE_URL}`")
-    st.caption("All queries routed via FastAPI")
-    st.caption("No Snowflake credentials in Streamlit")
+    st.caption("NL2SQL: Groq → Snowflake")
+    st.caption("Manual: Direct → Snowflake")
+
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔍 SQL Explorer")
 st.caption(
-    f"Query Snowflake via FastAPI · STOCKMARKETBATCH · STOCKMARKETSTREAM · "
-    f"API: `{API_BASE_URL}`"
+    f"Query Snowflake in plain English or raw SQL · "
+    f"Via FastAPI · API: `{API_BASE_URL}`"
 )
 st.divider()
 
-# ── Editor ────────────────────────────────────────────────────────────────────
-db_options  = ["STOCKMARKETBATCH","STOCKMARKETSTREAM"]
-default_db  = st.session_state.get("sql_db","STOCKMARKETBATCH")
-db = st.selectbox("Database", db_options,
-                  index=db_options.index(default_db))
+# ── Database selector ─────────────────────────────────────────────────────────
+db_options = ["STOCKMARKETBATCH", "STOCKMARKETSTREAM"]
+default_db = st.session_state.get("sql_db", "STOCKMARKETBATCH")
+db = st.selectbox(
+    "Database",
+    db_options,
+    index=db_options.index(default_db)
+)
 
-default_sql = st.session_state.get("sql_query",
-              PRESETS["Top 5 by avg return"]["sql"])
-sql = st.text_area("SQL query", value=default_sql, height=200,
-                   placeholder="SELECT * FROM HISTORICAL_STOCK LIMIT 10;")
-st.session_state["sql_query"] = sql
-
-col_run, _ = st.columns([1, 4])
-run = col_run.button("▶ Run query", type="primary", use_container_width=True)
-
-# ── Results ───────────────────────────────────────────────────────────────────
-if run and sql.strip():
-    with st.spinner(f"Running via FastAPI → Snowflake ({db})..."):
-        try:
-            df = run_query(sql, db)
-            st.success(f"{len(df):,} rows · {len(df.columns)} columns · {db}")
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.download_button(
-                label     = "Download as CSV",
-                data      = df.to_csv(index=False),
-                file_name = "query_result.csv",
-                mime      = "text/csv",
-            )
-        except Exception as e:
-            st.error(f"Query error: {str(e)}")
-else:
-    st.info(
-        "Select a preset from the sidebar or write your own SQL, then click Run query.\n\n"
-        f"Queries are executed via FastAPI at `{API_BASE_URL}` — no direct DB connection."
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE 1 — NATURAL LANGUAGE
+# ══════════════════════════════════════════════════════════════════════════════
+if mode == "Natural Language":
+    st.subheader("Ask in plain English")
+    st.caption(
+        "Type any question about your stock data. "
+        "Groq will generate the SQL, execute it, and show you both."
     )
+
+    # Input
+    default_q = st.session_state.get("nl_question", "")
+    question = st.text_input(
+        "Your question",
+        value=default_q,
+        placeholder="e.g. Show me AAPL close price for last 30 days",
+        label_visibility="collapsed"
+    )
+    st.session_state["nl_question"] = question
+
+    col_ask, _ = st.columns([1, 4])
+    ask = col_ask.button("▶ Ask", type="primary", use_container_width=True)
+
+    if ask and question.strip():
+        with st.spinner("Groq is generating SQL · Executing on Snowflake..."):
+            result = ask_natural_language(question.strip(), db)
+
+        if "error" in result and result["error"]:
+            st.error(f"Error: {result['error']}")
+
+        else:
+            # Show generated SQL — transparency is key for NL2SQL
+            st.success(f"{result.get('row_count', 0):,} rows · {result.get('column_count', 0)} columns · {db}")
+
+            with st.expander("🤖 Generated SQL", expanded=True):
+                st.code(result.get("generated_sql", ""), language="sql")
+                st.caption(
+                    "This SQL was generated by Groq llama-3.3-70b from your question. "
+                    "You can copy it to Manual SQL mode to edit."
+                )
+
+            # Show results
+            rows = result.get("rows", [])
+            if rows:
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+                # Copy to manual SQL
+                col_dl, col_copy = st.columns([1, 1])
+                with col_dl:
+                    st.download_button(
+                        label="Download as CSV",
+                        data=df.to_csv(index=False),
+                        file_name="nl_query_result.csv",
+                        mime="text/csv",
+                    )
+                with col_copy:
+                    if st.button("Edit SQL manually", use_container_width=True):
+                        st.session_state["sql_query"] = result.get("generated_sql", "")
+                        st.session_state["sql_db"]    = db
+                        st.rerun()
+            else:
+                st.info("Query returned no results.")
+
+    elif not question.strip() and ask:
+        st.warning("Please enter a question first.")
+
+    else:
+        # Empty state
+        st.info(
+            "Ask anything about your stock data in plain English.\n\n"
+            "Examples from the sidebar, or type your own question."
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE 2 — MANUAL SQL (existing behavior, unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
+else:
+    st.subheader("Write SQL directly")
+
+    default_sql = st.session_state.get(
+        "sql_query",
+        PRESETS["Top 5 by avg return"]["sql"]
+    )
+    sql = st.text_area(
+        "SQL query",
+        value=default_sql,
+        height=200,
+        placeholder="SELECT * FROM HISTORICAL_STOCK LIMIT 10;"
+    )
+    st.session_state["sql_query"] = sql
+
+    col_run, _ = st.columns([1, 4])
+    run = col_run.button("▶ Run query", type="primary", use_container_width=True)
+
+    if run and sql.strip():
+        with st.spinner(f"Running via FastAPI → Snowflake ({db})..."):
+            try:
+                df = run_query(sql, db)
+                st.success(f"{len(df):,} rows · {len(df.columns)} columns · {db}")
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    label     = "Download as CSV",
+                    data      = df.to_csv(index=False),
+                    file_name = "query_result.csv",
+                    mime      = "text/csv",
+                )
+            except Exception as e:
+                st.error(f"Query error: {str(e)}")
+    else:
+        st.info(
+            "Select a preset from the sidebar or write your own SQL, "
+            "then click Run query."
+        )

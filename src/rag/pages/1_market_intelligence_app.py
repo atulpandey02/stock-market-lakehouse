@@ -261,7 +261,7 @@ for msg in st.session_state["messages"]:
             sym = msg.get("symbol", "")
             if sym and sym != "All Stocks":
                 render_pipeline_metrics(msg["metrics"], sym)
-        st.write(safe_str(msg.get("content"), ""))
+        st.markdown(safe_str(msg.get("content"), "").replace("$", "\\$"))
         if msg["role"] == "assistant" and msg.get("sources"):
             render_sources(msg["sources"])
 
@@ -317,7 +317,7 @@ if user_input and user_input.strip():
         if metrics and sym and sym != "All Stocks":
             render_pipeline_metrics(metrics, sym)
 
-        st.write(answer)
+        st.markdown(answer.replace("$", "\\$"))
         render_sources(chunks)
 
     st.session_state["messages"].append({

@@ -81,17 +81,25 @@ def generate(
     # System prompt changes based on available data
     if pipeline_metrics:
         system_prompt = """You are a professional financial market analyst with access to \
-two data sources:
-1. Quantitative signals from a real-time data pipeline (Spark + dbt transformations)
-2. Recent financial news articles from a vector database
+                two data sources:
+                1. Quantitative signals from a real-time data pipeline (Spark + dbt transformations)
+                2. Recent financial news articles from a vector database
 
-Synthesise BOTH sources into a coherent analysis.
-Rules:
-- Always reference the pipeline signal (BULLISH/BEARISH/NEUTRAL) explicitly
-- If pipeline signal conflicts with news sentiment, flag this clearly
-- If SMA-5 > SMA-20 mention bullish crossover; if SMA-5 < SMA-20 mention bearish
-- Be concise — 4-6 sentences
-- Do not use external knowledge beyond what is provided"""
+                EXAMPLE:
+                Pipeline data: SMA-5 ($285) > SMA-20 ($273), Signal: BULLISH, Return: +1.14%
+                News: SeekingAlpha positive, Yahoo neutral
+                Answer:
+                SIGNAL: BULLISH
+                CONFIDENCE: HIGH
+                REASONING: The quantitative pipeline shows a golden crossover with SMA-5 above SMA-20 by $12, confirming bullish momentum. News sentiment is mixed but leans positive. The +1.14% daily return supports the upward trend.
+                RISK: A reversal below SMA-5 ($285) would invalidate the bullish signal.
+
+                Now analyze the following using the same format:
+                Rules:
+                - Always reference the pipeline signal (BULLISH/BEARISH/NEUTRAL) explicitly
+                - If pipeline signal conflicts with news sentiment, flag this clearly
+                - If SMA-5 > SMA-20 mention bullish crossover; if SMA-5 < SMA-20 mention bearish
+                - Do not use external knowledge beyond what is provided """
     else:
         system_prompt = """You are a professional financial market analyst.
 Answer questions using ONLY the provided news articles.
@@ -103,7 +111,21 @@ Do not use external knowledge."""
     if pipeline_metrics:
         user_content += f"QUANTITATIVE PIPELINE DATA:\n{pipeline_metrics}\n\n"
     user_content += f"RECENT NEWS ARTICLES:\n{news_context}\n\n"
-    user_content += f"Question: {question}\n\nAnalysis:"
+    user_content += f"""Question: {question}
+
+                    Think step by step:
+                    1. What does the quantitative signal say?
+                    2. What does the news sentiment say?
+                    3. Do they agree or conflict?
+                    4. What is the final recommendation?
+
+                    Return in this exact format:
+                    SIGNAL: [BULLISH/BEARISH/NEUTRAL]
+                    CONFIDENCE: [HIGH/MEDIUM/LOW]
+                    REASONING: [2-3 sentences]
+                    RISK: [one sentence]
+
+                    Analysis:"""
 
     try:
         response = http_requests.post(

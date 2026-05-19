@@ -49,3 +49,24 @@ class SQLRequest(BaseModel):
                 "database": "STOCKMARKETBATCH"
             }
         }
+
+
+class NLSQLRequest(BaseModel):
+    question: str = Field(
+        ...,
+        min_length=5,
+        max_length=500,
+        description="Natural language question about the data"
+    )
+    database: str = Field(
+        default="STOCKMARKETBATCH",
+        description="Snowflake database to query"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "question": "Show me AAPL close price for last 30 days",
+                "database": "STOCKMARKETBATCH"
+            }
+        }

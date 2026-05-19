@@ -118,3 +118,14 @@ class SQLResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error:   str
     detail:  str = ""
+
+
+class NLSQLResponse(BaseModel):
+    question:      str
+    generated_sql: str
+    row_count:     int
+    column_count:  int
+    columns:       List[str]
+    rows:          List[Dict[str, Any]]
+    database:      str
+    error:         Optional[str] = None

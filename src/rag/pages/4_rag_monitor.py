@@ -133,7 +133,8 @@ numeric_cols = [
 ]
 for col in numeric_cols:
     if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = df[col].fillna(0)
 
 if df.empty:
     st.warning(

@@ -207,13 +207,26 @@ if has_error(df_perf):
 elif df_perf.empty:
     st.warning("No data in STOCK_PERFORMANCE — run: dbt run --select stock_performance")
 else:
+    def color_signal(val):
+        val = str(val).upper()
+        if val in ("BULLISH", "BUY"):
+            return "background-color: #0a2a0a; color: #40c060"
+        elif val in ("BEARISH", "SELL"):
+            return "background-color: #2a0a0a; color: #e06060"
+        return ""
+
+    df_display = df_perf.rename(columns={
+        "SYMBOL": "Symbol", "TRADE_DATE": "Date",
+        "CLOSE": "Close ($)", "RETURN_PCT": "Return %",
+        "SMA_5": "SMA-5", "SMA_20": "SMA-20",
+        "SMA_SIGNAL": "SMA signal", "OVERALL_SIGNAL": "Signal",
+    })
+
     st.dataframe(
-        df_perf.rename(columns={
-            "SYMBOL": "Symbol", "TRADE_DATE": "Date",
-            "CLOSE": "Close ($)", "RETURN_PCT": "Return %",
-            "SMA_5": "SMA-5", "SMA_20": "SMA-20",
-            "SMA_SIGNAL": "SMA signal", "OVERALL_SIGNAL": "Signal",
-        }),
+        df_display.style.applymap(
+            color_signal,
+            subset=["SMA signal", "Signal"]
+        ),
         use_container_width=True,
         hide_index=True,
     )

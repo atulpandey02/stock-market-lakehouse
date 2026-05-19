@@ -190,9 +190,11 @@ def get_embeddings(texts: List[str]) -> List[List[float]]:
     Converts text → 384 numbers capturing semantic meaning.
     Runs on CPU — free, no API key needed.
     """
+    import numpy as np
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(EMBEDDING_MODEL)
-    return model.encode(texts, show_progress_bar=True).tolist()
+    vectors = model.encode(texts, show_progress_bar=True)
+    return np.asarray(vectors).tolist()
 
 
 # ── Step 4: Store in Pinecone ─────────────────────────────────────────────────
@@ -288,7 +290,7 @@ def retrieve_relevant_chunks(
 
 # ── Step 6: Generate Answer with Groq LLM ────────────────────────────────────
 
-def generate_answer_with_groq(question: str, chunks: List[Dict]) -> str:
+def generate_answer_with_groq(question: str, chunks: List[Dict]) -> Optional[str]:
     """
     Generate a grounded answer using Groq's free LLM API.
 
