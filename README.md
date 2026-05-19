@@ -1,25 +1,26 @@
-
 <div align="center">
 
-# Stock Market Intelligence Pipeline
+# Stock Market Intelligence Pipeline V2
 
 **A production-grade data engineering system that ingests, transforms, and analyses stock market data — then answers natural language questions about it using AI grounded in your own pipeline's output.**
 
 [![CI](https://github.com/atulpandey02/stock-market-rag-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/atulpandey02/stock-market-rag-pipeline/actions)
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apache-kafka&logoColor=white)](https://kafka.apache.org)
 [![Spark](https://img.shields.io/badge/Apache_Spark-E25A1C?style=flat-square&logo=apache-spark&logoColor=white)](https://spark.apache.org)
 [![Airflow](https://img.shields.io/badge/Apache_Airflow-017CEE?style=flat-square&logo=apache-airflow&logoColor=white)](https://airflow.apache.org)
 [![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?style=flat-square&logo=snowflake&logoColor=white)](https://snowflake.com)
 [![dbt](https://img.shields.io/badge/dbt-FF694B?style=flat-square&logo=dbt&logoColor=white)](https://getdbt.com)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com)
+[![Iceberg](https://img.shields.io/badge/Apache_Iceberg-3B6EA8?style=flat-square&logoColor=white)](https://iceberg.apache.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Pinecone](https://img.shields.io/badge/Pinecone-6EBF8B?style=flat-square&logoColor=white)](https://pinecone.io)
 [![Groq](https://img.shields.io/badge/Groq_Llama3-F55036?style=flat-square&logoColor=white)](https://groq.com)
 [![MinIO](https://img.shields.io/badge/MinIO-C72E49?style=flat-square&logo=minio&logoColor=white)](https://min.io)
 
 <br/>
 
-**9 Docker containers &nbsp;·&nbsp; 2 Airflow DAGs &nbsp;·&nbsp; 5 dbt models &nbsp;·&nbsp; 27 data quality tests &nbsp;·&nbsp; 300+ Pinecone chunks &nbsp;·&nbsp; 10 stocks tracked**
+**9 Docker containers &nbsp;·&nbsp; 2 Airflow DAGs &nbsp;·&nbsp; 7 dbt models &nbsp;·&nbsp; 27 data quality tests &nbsp;·&nbsp; 7 FastAPI endpoints &nbsp;·&nbsp; 300+ Pinecone chunks &nbsp;·&nbsp; 10 stocks tracked**
 
 <br/>
 
@@ -29,11 +30,26 @@
 
 ---
 
+## What's New in V2
+
+| Feature | Status |
+|---|---|
+| **Apache Iceberg** — open table format replacing plain Parquet in MinIO | ✅ Done |
+| **FastAPI layer** — 7 REST endpoints between Streamlit and all data sources | ✅ Done |
+| **Snowflake RBAC** — 3 roles, 3 users, column masking on price data | ✅ Done |
+| **Medallion architecture** — GenAI observability (BRONZE → SILVER → GOLD) | ✅ Done |
+| **Semantic similarity monitoring** — track RAG search quality over time | ✅ Done |
+| **NL2SQL** — ask questions in plain English, Groq generates SQL | ✅ Done |
+| **4-page Streamlit app** — added RAG Monitor dashboard | ✅ Done |
+
+---
+
 ## Table of Contents
 
 - [How It Works](#how-it-works)
 - [What Makes This Different](#what-makes-this-different)
 - [Architecture](#architecture)
+- [V2 New Features](#v2-new-features)
 - [Pipeline in Action](#pipeline-in-action)
 - [Tech Stack](#tech-stack)
 - [Infrastructure](#infrastructure)
@@ -41,48 +57,54 @@
 - [Data Flow](#data-flow)
 - [Snowflake Schema](#snowflake-schema)
 - [dbt Quality Gates](#dbt-quality-gates)
-- [CI/CD Pipeline](#cicd-pipeline)
+- [FastAPI Endpoints](#fastapi-endpoints)
+- [AI Observability](#ai-observability)
 - [Key Engineering Decisions](#key-engineering-decisions)
 - [Lessons Learned](#lessons-learned)
 - [Getting Started](#getting-started)
 - [Resume Bullets](#resume-bullets)
-- [Future Enhancements](#future-enhancements)
 
 ---
 
 ## How It Works
 
-A 6-step end-to-end flow from raw market data to AI-grounded answers:
+An 8-step end-to-end flow from raw market data to AI-grounded answers:
 
 ```
 1. Airflow triggers daily  →  Kafka ingests OHLCV history from Finnhub API
 2. Spark computes          →  SMA-5, SMA-20, daily returns, BUY/SELL signals
-3. Snowflake stores        →  everything via idempotent MERGE (no duplicates on retry)
-4. dbt transforms          →  raw tables into analytical marts (27 tests gate every run)
-5. Pinecone stores         →  300+ Finnhub news embeddings for semantic retrieval
-6. Groq Llama3 fuses       →  dbt quantitative signals + Pinecone news into grounded answers
+3. Iceberg stores          →  data as open table format on MinIO (s3a://)
+4. Snowflake loads         →  from Iceberg paths via incremental MERGE
+5. dbt transforms          →  raw tables into analytical marts (27 tests gate every run)
+6. FastAPI serves          →  7 REST endpoints consumed by all Streamlit pages
+7. Pinecone retrieves      →  300+ Finnhub news embeddings for semantic search
+8. Groq Llama3 fuses       →  dbt quantitative signals + Pinecone news into grounded answers
 ```
 
 ---
 
 ## What Makes This Different
 
-Most RAG projects pull from a static document store. This one is different — **the AI answers are grounded in data your pipeline computed**.
+Most RAG projects pull from a static document store. This one is different — **the AI answers are grounded in data your pipeline computed, served through a production API layer**.
 
 When you ask *"Should I buy AAPL?"* the system:
 
-1. Queries the `STOCK_PERFORMANCE` dbt mart for the latest SMA crossover signal
-2. Retrieves the 5 most semantically relevant news chunks from Pinecone
-3. Feeds both into Groq Llama3 — if the quantitative signal conflicts with news sentiment, the model flags it explicitly
+1. Calls `POST /api/v1/intelligence/query` on the FastAPI layer
+2. FastAPI queries the `STOCK_PERFORMANCE` dbt mart for the latest SMA crossover signal
+3. FastAPI searches Pinecone for the 5 most semantically relevant news chunks
+4. FastAPI feeds both into Groq Llama3-70b — if quantitative signal conflicts with news sentiment, the model flags it explicitly
+5. Every query is logged to the BRONZE observability layer for monitoring
 
 ```
-📊 Pipeline Data — AAPL · 🟢 BULLISH · from dbt STOCK_PERFORMANCE
-   Close: $255.92  |  SMA-5: $255.38  |  SMA-20: $251.74  |  Return: +0.68%
+📊 Pipeline Data — AAPL · 🟢 BUY · from dbt STOCK_PERFORMANCE
+   Close: $293.32  |  SMA-5: $285.86  |  SMA-20: $273.21  |  Return: +1.14%
 
-"The pipeline signal is BULLISH with SMA-5 above SMA-20 — a classic
-bullish crossover. Recent news has mixed sentiment however, with analysts
-at Evercore maintaining a $330 price target but broader market concerns
-flagged by multiple sources. The conflicting signals warrant caution..."
+SIGNAL: BULLISH
+CONFIDENCE: HIGH
+REASONING: The quantitative pipeline shows a golden crossover with SMA-5 above
+SMA-20 by $12.65, confirming bullish momentum. News sentiment from SeekingAlpha
+is positive, citing resilient prospects and strong services growth.
+RISK: A reversal below SMA-5 ($285.86) would invalidate the bullish signal.
 ```
 
 This is also a Lambda architecture portfolio project — batch and streaming run simultaneously into two separate Snowflake databases, with a custom `MinIODataSensor` validating data landing before Spark ever runs.
@@ -92,16 +114,116 @@ This is also a Lambda architecture portfolio project — batch and streaming run
 ## Architecture
 
 <div align="center">
-  <img src="docs/image/Architecture_diagram.png" width="85%" alt="Architecture Diagram"/>
+  <img src="docs/image/Architecture_diagram.png" width="95%" alt="Architecture Diagram V2"/>
 </div>
 
 <br/>
 
 The system runs two parallel pipelines that converge at the intelligence layer:
 
-- **Batch pipeline** — fetches a full year of OHLCV history daily via Finnhub, processes it through Spark, loads into Snowflake via MERGE, and runs dbt transformations to produce BUY/SELL signals
-- **Streaming pipeline** — generates real-time price ticks every 30 seconds, computes 3-minute and 5-minute windowed aggregations via Spark Streaming, loads into a separate Snowflake database
-- **Intelligence layer** — the RAG engine synthesises **both** quantitative pipeline signals from dbt **and** financial news from Pinecone to answer natural language questions — the answer is only as good as your pipeline
+- **Batch pipeline** — fetches a full year of OHLCV history daily via Finnhub, writes Iceberg tables to MinIO, processes through Spark, loads into Snowflake via MERGE, and runs dbt transformations to produce BUY/SELL signals
+- **Streaming pipeline** — generates real-time price ticks every 30 seconds, computes windowed aggregations via Spark Streaming, writes to Iceberg realtime tables, loads into a separate Snowflake database
+- **FastAPI layer** — all Streamlit pages call FastAPI REST endpoints instead of connecting directly to Snowflake/Pinecone/Groq — credentials never leave the API layer
+- **Intelligence layer** — the RAG engine synthesises quantitative pipeline signals from dbt AND financial news from Pinecone, logs every query to the Medallion observability layer
+
+---
+
+## V2 New Features
+
+### 1. Apache Iceberg
+
+Switched from plain Parquet to Apache Iceberg using HadoopCatalog on MinIO.
+
+```python
+# Spark config — 3 JARs baked into custom Dockerfile.spark
+.config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+.config("spark.sql.catalog.iceberg", "org.apache.iceberg.spark.SparkCatalog")
+.config("spark.sql.catalog.iceberg.type", "hadoop")
+.config("spark.sql.catalog.iceberg.warehouse", "s3a://stock-market-data/iceberg")
+```
+
+**Why Iceberg over plain Parquet:**
+- Schema evolution without rewriting files
+- Time travel (query data as of any point in time)
+- ACID transactions on object storage
+- Partition pruning without directory scanning
+
+### 2. FastAPI Layer — 7 Endpoints
+
+All Streamlit pages now call FastAPI instead of connecting directly to databases.
+
+```
+GET  /api/v1/health                           — service health check
+GET  /api/v1/stocks/historical?symbol=AAPL    — OHLCV data
+GET  /api/v1/stocks/realtime?symbol=AAPL      — windowed stream metrics
+GET  /api/v1/stocks/signals?symbol=AAPL       — dbt BUY/SELL signals
+GET  /api/v1/pipeline/kpis                    — pipeline health metrics
+POST /api/v1/intelligence/query               — full RAG pipeline
+POST /api/v1/sql/query                        — safe SQL passthrough
+POST /api/v1/sql/ask                          — NL2SQL via Groq
+```
+
+**Why a FastAPI layer:**
+- Credentials never reach the frontend
+- One place to add caching, rate limiting, auth
+- Testable endpoints (Swagger UI at `/docs`)
+- Streamlit becomes a pure UI layer
+
+### 3. Snowflake RBAC + Column Masking
+
+Three-tier role hierarchy with dynamic column masking on price data.
+
+```sql
+-- Three roles with least-privilege access
+ANALYST_ROLE    → SELECT only (FastAPI service account)
+PIPELINE_ROLE   → INSERT/UPDATE (Spark/Airflow service account)
+READ_ONLY_ROLE  → SELECT + masked price columns (SQL Explorer)
+
+-- Dynamic masking policy on price columns
+CREATE MASKING POLICY price_mask AS (val FLOAT) RETURNS FLOAT ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('ANALYST_ROLE', 'PIPELINE_ROLE') THEN val
+        ELSE 0.0   -- READ_ONLY_ROLE sees 0.0 instead of real prices
+    END;
+```
+
+### 4. Medallion Architecture for GenAI Observability
+
+Every intelligence query is logged and transformed through three layers:
+
+```
+BRONZE  →  RAW_INTELLIGENCE_LOGS
+           Raw event: question, symbol, Pinecone results (JSON),
+           Groq response, latency_ms, model, timestamp
+
+SILVER  →  stg_intelligence_logs (dbt view)
+           Cleans data, extracts similarity scores from JSON,
+           calculates speed categories, derives response length
+
+GOLD    →  intelligence_metrics (dbt table)
+           Daily aggregates: avg_similarity_score, avg_latency_ms,
+           slow_queries, sentiment distribution, total_queries per symbol
+```
+
+**What this enables:** Track when semantic search quality degrades (similarity score drops), detect slow queries, monitor sentiment trends over time.
+
+### 5. NL2SQL
+
+Ask questions in plain English — Groq generates the SQL, executes it, and shows both.
+
+```
+User: "Which stocks have a BUY signal right now?"
+    ↓
+Groq generates:
+SELECT SYMBOL, TRADE_DATE, CLOSE_PRICE, OVERALL_SIGNAL
+FROM STOCK_PERFORMANCE
+WHERE OVERALL_SIGNAL = 'BUY'
+ORDER BY SYMBOL;
+    ↓
+Executes on Snowflake → returns results
+```
+
+Safety: Temperature=0 for deterministic generation, SELECT-only validation, blocks all DML keywords.
 
 ---
 
@@ -124,30 +246,32 @@ The system runs two parallel pipelines that converge at the intelligence layer:
   </table>
 </div>
 
-### Intelligence Layer — Streamlit Dashboard
+### Streamlit — 4-Page Dashboard
 
-<div align="center">
-  <img src="docs/image/streamlit_chat.png" width="85%" alt="Streamlit Market Intelligence Chat"/>
-  <br/><sub><b>Page 1 — RAG chat grounded in live dbt pipeline signals</b></sub>
-</div>
+**Page 1 — Market Intelligence (RAG Chat)**
 
-<br/>
+RAG chat grounded in live dbt pipeline signals + Pinecone news. Shows SIGNAL, CONFIDENCE, REASONING, RISK. Color-coded pipeline metrics card per stock.
 
-> The dashboard has three pages. **Page 1** is the RAG chat — it shows the quantitative BUY/SELL signal from the `STOCK_PERFORMANCE` dbt mart alongside retrieved Pinecone news chunks before generating a Groq Llama3 response, and explicitly flags when quantitative and sentiment signals conflict. **Page 2** queries Snowflake directly for live ingestion stats and pipeline health. **Page 3** is a SQL explorer for ad-hoc queries against both `STOCKMARKETBATCH` and `STOCKMARKETSTREAM` databases.
+**Page 2 — Pipeline Dashboard**
 
-<div align="center">
-  <img src="docs/image/streamlit_dashboard.png" width="85%" alt="Streamlit Pipeline Dashboard"/>
-  <br/><sub><b>Page 2 — live pipeline monitor querying Snowflake directly</b></sub>
-</div>
+Real-time KPIs, color-coded BUY/SELL signals table (green=BULLISH, red=BEARISH), price history chart, top movers, data quality checks.
 
-### Data Quality — dbt Lineage + Pinecone Index
+**Page 3 — SQL Explorer**
+
+Two modes: Natural Language (type plain English → Groq generates SQL) and Manual SQL (write raw SQL with preset queries). Shows generated SQL for transparency.
+
+**Page 4 — RAG Monitor (new in V2)**
+
+Medallion architecture observability dashboard. Shows semantic similarity scores by symbol, latency analysis, sentiment distribution, recent queries from BRONZE layer.
+
+### Data Quality — dbt Lineage
 
 <div align="center">
   <table>
     <tr>
       <td align="center" width="50%">
         <img src="docs/image/Lineage Graph.png" width="100%" alt="dbt Lineage Graph"/>
-        <br/><sub><b>dbt — model lineage and 27 passing tests</b></sub>
+        <br/><sub><b>dbt — 7 models, 27 passing tests</b></sub>
       </td>
       <td align="center" width="50%">
         <img src="docs/image/pinecone_index.png" width="100%" alt="Pinecone Vector Index"/>
@@ -161,20 +285,22 @@ The system runs two parallel pipelines that converge at the intelligence layer:
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Message broker | Apache Kafka — dual topics (`batch-stock-data` + `realtime-stock-data`) |
-| Data lake | MinIO — Hive-partitioned `year=/month=/day=/symbol=` |
-| Processing | Apache Spark 3.5.1 — batch transforms + windowed aggregations |
-| Warehouse | Snowflake — two databases, incremental MERGE loading |
-| Transformation | dbt — 5 models, 27 automated quality tests |
-| Orchestration | Apache Airflow 2.9.3 — custom MinIO sensors, retry logic |
-| Vector DB | Pinecone — 300+ embedded financial news chunks |
-| Embeddings | sentence-transformers/all-MiniLM-L6-v2 — 384-dim, free, local |
-| LLM | Groq Llama3-8b — grounded financial Q&A |
-| UI | Streamlit — 3-page dashboard (RAG chat, pipeline monitor, SQL explorer) |
-| Infrastructure | Docker Compose — 9 containerised services |
-| CI/CD | GitHub Actions — syntax checks, unit tests, dbt validation |
+| Layer | Technology | Notes |
+|---|---|---|
+| Message broker | Apache Kafka | Dual topics: `batch-stock-data` + `realtime-stock-data` |
+| Data lake | MinIO + Apache Iceberg | HadoopCatalog, s3a://, ACID transactions |
+| Processing | Apache Spark 3.5.1 | Batch transforms + windowed stream aggregations |
+| Warehouse | Snowflake | Two databases, incremental MERGE, RBAC, column masking |
+| Transformation | dbt | 7 models (5 original + 2 observability), 27 tests |
+| Orchestration | Apache Airflow 2.9.3 | Custom MinIO sensors, retry logic |
+| API layer | FastAPI + uvicorn | 8 endpoints, Pydantic models, rate limiting |
+| Vector DB | Pinecone | 300+ embedded financial news chunks, 384-dim |
+| Embeddings | sentence-transformers/all-MiniLM-L6-v2 | Free, local, no API key |
+| LLM | Groq Llama3.3-70b | Few-shot + chain-of-thought prompting |
+| NL2SQL | Groq + schema context | Plain English → validated Snowflake SQL |
+| UI | Streamlit | 4-page dashboard with clickable home page |
+| Infrastructure | Docker Compose | 9 containerised services |
+| CI/CD | GitHub Actions | Syntax checks, unit tests, dbt validation |
 
 ---
 
@@ -182,140 +308,133 @@ The system runs two parallel pipelines that converge at the intelligence layer:
 
 ### Docker Services (9 containers)
 
-| Service | Role |
-|---|---|
-| `zookeeper` | Kafka cluster coordination |
-| `kafka` | Message broker — batch and realtime topics |
-| `spark-master` | Spark cluster manager |
-| `spark-worker-1` / `spark-worker-2` | Distributed compute nodes |
-| `airflow-webserver` | DAG UI at localhost:8080 |
-| `airflow-scheduler` | DAG trigger and task queue |
-| `minio` | S3-compatible data lake at localhost:9001 |
-| `postgres` | Airflow metadata database |
+```yaml
+services:
+  zookeeper         # Kafka coordination
+  kafka             # Message broker — batch + realtime topics
+  minio             # Object storage — Iceberg warehouse
+  spark-master      # Spark coordinator
+  spark-worker      # 3 workers (configurable)
+  spark-client      # Job submission
+  airflow-webserver # DAG UI at localhost:8080
+  airflow-scheduler # DAG execution engine
+  postgres          # Airflow metadata store
+```
 
-### Kafka Topics
+### Local Services (outside Docker)
 
-| Topic | Producer | Consumer | Destination |
-|---|---|---|---|
-| `batch-stock-data` | `batch_data_producer.py` | `batch_data_consumer.py` | `MinIO raw/historical/` |
-| `realtime-stock-data` | `stream_data_producer.py` | `realtime_data_consumer.py` | `MinIO raw/realtime/` |
+```
+FastAPI (uvicorn)     # src/api/main.py — localhost:8000
+Streamlit             # src/rag/app.py — localhost:8501
+dbt                   # src/dbt/ — runs in dbt_venv
+```
 
 ---
 
 ## Project Structure
 
 ```
-stockmarketdatapipeline/
-│
-├── docker-compose.yaml
-├── requirements.txt
-├── .env.example                              ← copy to .env and fill credentials
-├── .gitignore
-│
-├── docs/images/                              ← all screenshots for this README
-│
+stockmarketdatapipeline_v2/
 ├── src/
-│   │
-│   ├── kafka/
-│   │   ├── producer/
-│   │   │   ├── batch_data_producer.py        ← Finnhub OHLCV → Kafka
-│   │   │   └── stream_data_producer.py       ← price ticks → Kafka
-│   │   └── consumer/
-│   │       ├── batch_data_consumer.py        ← Kafka → MinIO raw/historical/
-│   │       └── realtime_data_consumer.py     ← Kafka → MinIO raw/realtime/
-│   │
-│   ├── spark/jobs/
-│   │   ├── spark_batch_processor.py          ← SMA-5/20, returns, daily range
-│   │   ├── spark_stream_processor.py         ← always-on structured streaming
-│   │   └── spark_stream_batch_processor.py   ← 3-min/5-min windowed aggregations
-│   │
-│   ├── snowflake/
-│   │   ├── load_to_snowflake.py              ← historical → Snowflake MERGE
-│   │   └── load_stream_to_snowflake.py       ← realtime → Snowflake MERGE
-│   │
-│   ├── dbt/
+│   ├── api/                          # FastAPI layer (NEW in V2)
+│   │   ├── main.py
+│   │   ├── config.py
 │   │   ├── models/
-│   │   │   ├── staging/                      ← stg_historical_stock, stg_realtime_stock
-│   │   │   └── marts/                        ← stock_daily_metrics, stock_performance
-│   │   └── tests/                            ← 4 custom SQL data quality tests
-│   │
-│   ├── rag/
-│   │   ├── rag_pipeline.py                   ← Finnhub news → Pinecone ingestion
-│   │   ├── app.py                            ← Streamlit entry point
-│   │   └── pages/
-│   │       ├── 1_Market_Intelligence.py      ← RAG chat + dbt metrics card
-│   │       ├── 2_Pipeline_Dashboard.py       ← live Snowflake monitoring
-│   │       └── 3_SQL_Explorer.py             ← ad-hoc SQL queries
-│   │
-│   └── airflow/dags/
-│       ├── stock_market_batch_dag.py         ← 6-task batch orchestration
-│       ├── stock_market_stream_dag.py        ← 8-task stream orchestration
-│       └── scripts/                          ← script copies for Airflow workers
-│
-├── tests/
-│   └── unit_tests.py
-│
-└── .github/workflows/
-    └── ci.yml                                ← syntax checks, unit tests, dbt parse
+│   │   │   ├── requests.py
+│   │   │   └── responses.py
+│   │   ├── routers/
+│   │   │   ├── health.py
+│   │   │   ├── stocks.py
+│   │   │   ├── pipeline.py
+│   │   │   ├── intelligence.py
+│   │   │   └── sql.py
+│   │   └── services/
+│   │       ├── snowflake.py
+│   │       ├── pinecone_svc.py
+│   │       ├── groq_svc.py
+│   │       ├── nlsql_svc.py          # NL2SQL (NEW in V2)
+│   │       ├── logging_svc.py        # Observability (NEW in V2)
+│   │       └── cache.py
+│   ├── airflow/
+│   │   └── dags/
+│   │       ├── stock_market_batch_pipeline.py
+│   │       └── stock_streaming_pipeline.py
+│   ├── dbt/
+│   │   └── models/
+│   │       ├── staging/
+│   │       │   ├── stg_historical_stock.sql
+│   │       │   ├── stg_realtime_stock.sql
+│   │       │   └── stg_intelligence_logs.sql   # NEW in V2
+│   │       └── marts/
+│   │           ├── stock_daily_metrics.sql
+│   │           ├── stock_performance.sql
+│   │           ├── stock_realtime_summary.sql
+│   │           └── intelligence_metrics.sql     # NEW in V2
+│   ├── kafka/
+│   ├── spark/
+│   └── rag/
+│       ├── app.py
+│       ├── rag_pipeline.py
+│       └── pages/
+│           ├── 1_Market_Intelligence_App.py
+│           ├── 2_Pipeline_Dashboard.py
+│           ├── 3_Sql_Explorer.py
+│           └── 4_Rag_Monitor.py                # NEW in V2
+├── Dockerfile.spark                            # Custom JARs (Iceberg)
+├── docker-compose.yaml
+└── requirements-api.txt
 ```
 
 ---
 
 ## Data Flow
 
-### Batch (runs daily via Airflow)
 ```
-Finnhub API  →  Kafka  →  MinIO raw/historical/
-             →  Spark (SMA-5, SMA-20, daily_return_pct, is_positive_day)
-             →  MinIO processed/historical/
-             →  Snowflake HISTORICAL_STOCK  (MERGE on symbol + date)
-             →  dbt run  → stg_historical_stock
-                         → stock_daily_metrics
-                         → stock_performance  ← BUY/SELL signals
-             →  dbt test → 27 checks pass or pipeline fails
-```
-
-### Streaming (continuous via Airflow)
-```
-Price generator  →  Kafka  →  MinIO raw/realtime/
-                 →  Spark windowed aggregations (3-min, 5-min MA)
-                 →  Snowflake REALTIME_STOCK  (MERGE on symbol + window_start)
-```
-
-### Intelligence (on demand via Streamlit)
-```
-User question
-  →  Snowflake STOCK_PERFORMANCE  (dbt BUY/SELL signal, SMA crossover)
-  →  Pinecone semantic search      (top 5 relevant news chunks)
-  →  Groq Llama3                   (synthesises both, flags conflicts)
-  →  Streamlit                     (answer + metrics card + sources)
+Yahoo Finance / Alpha Vantage / Finnhub
+    ↓ (Kafka batch + realtime topics)
+Apache Kafka
+    ↓
+Apache Spark (batch_processor.py / stream_batch_processor.py)
+    ↓
+MinIO — Apache Iceberg tables
+    s3a://stock-market-data/iceberg/stock_market/historical_stocks
+    s3a://stock-market-data/iceberg/stock_market/realtime_stocks
+    ↓
+Snowflake (incremental MERGE)
+    STOCKMARKETBATCH.PUBLIC.HISTORICAL_STOCK
+    STOCKMARKETSTREAM.PUBLIC.REALTIME_STOCK
+    ↓
+dbt (7 models, 27 tests)
+    STOCK_PERFORMANCE → BUY/SELL signals
+    INTELLIGENCE_METRICS → RAG observability
+    ↓
+FastAPI (8 endpoints)
+    ↓
+Streamlit (4 pages)
+    ↑
+Pinecone (300+ news chunks) ──────── Groq Llama3.3-70b
+    ↑
+Finnhub news → sentence-transformers embeddings
 ```
 
 ---
 
 ## Snowflake Schema
 
-**STOCKMARKETBATCH.PUBLIC.HISTORICAL_STOCK**
+### STOCKMARKETBATCH.PUBLIC
 
-| Column | Type | Description |
+| Table | Key Columns | Description |
 |---|---|---|
-| symbol | STRING | Stock ticker |
-| date | DATE | Trading date |
-| open_price / close_price | FLOAT | OHLC prices |
-| daily_return_pct | FLOAT | `(close - open) / open × 100` |
-| daily_range | FLOAT | `high - low` |
-| is_positive_day | BOOLEAN | `close > open` |
-| sma_5 / sma_20 | FLOAT | Moving averages computed by Spark |
+| `HISTORICAL_STOCK` | SYMBOL, DATE, OHLCV, SMA_5, SMA_20 | Raw batch data from Spark |
+| `STOCK_PERFORMANCE` | SYMBOL, TRADE_DATE, OVERALL_SIGNAL, SMA_SIGNAL | dbt mart — BUY/SELL signals |
+| `STOCK_DAILY_METRICS` | SYMBOL, DATE, DAILY_RETURN_PCT | dbt mart — derived metrics |
+| `RAW_INTELLIGENCE_LOGS` | LOG_ID, QUESTION, SYMBOL, PINECONE_RESULTS, LATENCY_MS | BRONZE observability layer |
 
-**STOCKMARKETSTREAM.PUBLIC.REALTIME_STOCK**
+### STOCKMARKETSTREAM.PUBLIC
 
-| Column | Type | Description |
+| Table | Key Columns | Description |
 |---|---|---|
-| symbol | STRING | Stock ticker |
-| window_start | TIMESTAMP | Aggregation window start |
-| ma_3m / ma_5m | FLOAT | Windowed moving averages |
-| volatility_3m / volatility_5m | FLOAT | Price std deviation per window |
-| volume_sum_3m / volume_sum_5m | BIGINT | Volume per window |
+| `REALTIME_STOCK` | SYMBOL, WINDOW_START, MA_15M, MA_1H, VOLATILITY_15M | Spark windowed aggregations |
 
 ---
 
@@ -337,21 +456,66 @@ assert_expected_symbols    → exactly 10 stocks, no drift
 
 ---
 
-## CI/CD Pipeline
+## FastAPI Endpoints
 
-Five jobs run on every push to `main` or `develop` via GitHub Actions:
+All endpoints documented at `http://localhost:8000/docs` (Swagger UI).
 
-| Job | What it checks |
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Health check for all services |
+| `GET` | `/api/v1/stocks/historical` | OHLCV + SMA data |
+| `GET` | `/api/v1/stocks/realtime` | Latest windowed stream metrics |
+| `GET` | `/api/v1/stocks/signals` | dbt BUY/SELL signals |
+| `GET` | `/api/v1/pipeline/kpis` | Aggregated pipeline health |
+| `POST` | `/api/v1/intelligence/query` | Full RAG pipeline |
+| `POST` | `/api/v1/sql/query` | Safe SQL passthrough (SELECT only) |
+| `POST` | `/api/v1/sql/ask` | NL2SQL — plain English to SQL |
+
+---
+
+## AI Observability
+
+Every intelligence query is automatically logged and monitored.
+
+### What gets logged (BRONZE)
+
+```json
+{
+  "question": "What is the outlook for AAPL?",
+  "symbol": "AAPL",
+  "pinecone_results": [...],
+  "groq_response": "SIGNAL: BULLISH...",
+  "latency_ms": 2419,
+  "model": "llama-3.3-70b-versatile"
+}
+```
+
+### What gets monitored (GOLD — `intelligence_metrics`)
+
+| Metric | What it tells you |
 |---|---|
-| Python Syntax Check | All `.py` files in `src/` parse without errors |
-| Unit Tests | RAG pipeline logic — no Kafka, MinIO, or Snowflake needed |
-| dbt Structure Validation | All required model and test files exist, `dbt parse` validates SQL |
-| Airflow DAG Validation | Both DAGs import cleanly with dummy env vars |
-| Project Structure Check | All expected files present, `.env` not committed |
+| `avg_similarity_score` | Pinecone search quality — drop indicates index degradation |
+| `avg_latency_ms` | Response time trend — spike indicates service issue |
+| `slow_queries` | Count of queries taking >8 seconds |
+| `positive_results` | News sentiment distribution per stock |
+| `total_queries` | Usage volume per symbol per day |
+
+### Hallucination prevention
+
+Three complementary layers:
+1. **RAG grounding** — Groq only sees real data (Pinecone + dbt), cannot use external knowledge
+2. **Structured prompting** — Few-shot examples + chain-of-thought + SIGNAL/CONFIDENCE/REASONING format
+3. **Semantic monitoring** — Track similarity scores; low scores flag potentially irrelevant context
 
 ---
 
 ## Key Engineering Decisions
+
+**Why Iceberg over plain Parquet?**
+Schema evolution, time travel, and ACID transactions on object storage. When the batch pipeline retries, Iceberg handles concurrent writes without corruption. With plain Parquet, partial writes leave corrupt files.
+
+**Why FastAPI between Streamlit and data sources?**
+Credentials never reach the frontend. One place to add caching, auth, and rate limiting. Streamlit becomes a pure UI layer — swap Snowflake for Databricks without changing a single page file.
 
 **Why MERGE instead of INSERT?**
 Idempotency — if Airflow retries a failed task, MERGE updates existing rows instead of creating duplicates. Critical for production pipelines where task reruns are expected.
@@ -359,39 +523,38 @@ Idempotency — if Airflow retries a failed task, MERGE updates existing rows in
 **Why custom MinIO sensor instead of time-based wait?**
 A time-based sleep is fragile. The custom `MinIODataSensor` polls every 30 seconds and only unblocks Spark when files are confirmed present — preventing silent failures on empty partitions.
 
-**Why `datetime.now(UTC)` in the sensor instead of `context['ds']`?**
-Airflow's `ds` is the logical schedule date — when you manually trigger a DAG it lags behind the actual date. Files written by the consumer use real UTC time, so the sensor must match that.
-
 **Why sentence-transformers instead of OpenAI embeddings?**
 Free, runs locally, no API key, no rate limits. `all-MiniLM-L6-v2` at 384 dimensions is fast on CPU and sufficient for financial news retrieval.
 
 **Why separate Snowflake databases for batch and stream?**
 Different update patterns and SLAs. Batch loads once daily with full MERGE semantics. Stream loads every few minutes with window-based keys. Separating them prevents schema conflicts and makes access control simpler.
 
+**Why temperature=0 for NL2SQL?**
+SQL generation must be deterministic. Same question should always produce the same query. Temperature=0 eliminates randomness — critical when the output is executable code.
+
 ---
 
 ## Lessons Learned
 
-> These are real bugs hit during development — each one taught something about production data engineering that no tutorial covers.
-
 | Problem | Root Cause | Fix |
 |---|---|---|
-| Silent data loss in Snowflake | UTC/EST timezone mismatch — consumer wrote `day=29`, Spark read `day=28` | Standardised everything to explicit `datetime.now(timezone.utc)` |
-| MinIO sensor checking wrong date | `context['ds']` returns logical schedule date, not trigger date | Changed sensor to use `datetime.now(UTC)` directly |
-| Kafka consumer crashes on startup | `group.id=None` — env var missing from docker-compose | Added `KAFKA_GROUP_BATCH_ID` to `x-airflow-common` |
+| Silent data loss in Snowflake | UTC/EST timezone mismatch | Standardised to `datetime.now(timezone.utc)` everywhere |
+| MinIO sensor checking wrong date | `context['ds']` returns logical schedule date | Changed sensor to use `datetime.now(UTC)` directly |
+| Kafka consumer crashes on startup | `group.id=None` — env var missing | Added `KAFKA_GROUP_BATCH_ID` to `x-airflow-common` |
 | Spark `PATH_NOT_FOUND` | `recursiveFileLookup` treated single CSV as directory | Switched to glob pattern |
-| Streamlit credentials not found | `find_dotenv(usecwd=True)` starts from CWD not file location | Walk up from `Path(__file__)` instead |
-| dbt alias conflict | `context['ds']` undefined in `run_spark_processing` | Restored the assignment and replaced `now` references with `ds` |
+| FastAPI wrong uvicorn binary | `/opt/anaconda3/bin/uvicorn` instead of venv | Use `python -m uvicorn` always |
+| Shell env vars overriding `.env` | Old credentials exported in `~/.zshrc` | Removed exports; use `load_dotenv(override=True)` |
+| `PARSE_JSON()` in VALUES clause fails | Snowflake doesn't allow function calls in VALUES | Changed to `INSERT INTO ... SELECT` pattern |
+| Pydantic field mismatch | Streamlit sent `symbol_filter`, model expected `symbol` | Matched field names to Pydantic model exactly |
+| LaTeX rendering in Streamlit | `st.write()` interprets `$293.32` as math | Use `st.markdown(text.replace("$", "\\$"))` |
 
 ---
 
 ## Getting Started
 
-> Full setup takes approximately 15–20 minutes including Docker pulling all images.
+> Full setup takes approximately 20–25 minutes including Docker pulling all images.
 
 ### Prerequisites
-
-All external services below have free tiers — no credit card required for Finnhub, Pinecone, or Groq.
 
 | Requirement | Where to get it |
 |---|---|
@@ -403,17 +566,23 @@ All external services below have free tiers — no credit card required for Finn
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and fill in the following:
+```bash
+# Snowflake
+SNOWFLAKE_ACCOUNT=your_account_identifier
+SNOWFLAKE_USER=your_username
+SNOWFLAKE_PASSWORD=your_password
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_ROLE=ACCOUNTADMIN
 
-| Variable | Description |
-|---|---|
-| `SNOWFLAKE_ACCOUNT` | Account identifier from Snowflake console — e.g. `abc12345.us-east-1` |
-| `SNOWFLAKE_USER` | Your Snowflake username |
-| `SNOWFLAKE_PASSWORD` | Your Snowflake password |
-| `SNOWFLAKE_WAREHOUSE` | Warehouse name — default `COMPUTE_WH` |
-| `FINNHUB_API_KEY` | Finnhub API key for OHLCV history and news |
-| `PINECONE_API_KEY` | Pinecone API key for vector storage and search |
-| `GROQ_API_KEY` | Groq API key for Llama3 inference |
+# API keys
+FINNHUB_API_KEY=your_finnhub_key
+PINECONE_API_KEY=your_pinecone_key
+PINECONE_INDEX_NAME=stock-market-rag
+GROQ_API_KEY=your_groq_key
+
+# App
+API_BASE_URL=http://localhost:8000
+```
 
 ### Run It
 
@@ -424,30 +593,29 @@ cd stock-market-rag-pipeline
 
 # 2. Configure
 cp .env.example .env
-# Fill in your credentials — see the table above
+# Fill in your credentials
 
 # 3. Start all 9 Docker services
 docker-compose up -d
 
 # 4. Trigger batch pipeline
-# Open Airflow UI → http://localhost:8080  (admin / admin)
+# Open Airflow UI → http://localhost:8080 (admin / admin)
 # Find stock_market_batch_pipeline → click ▶ Trigger
 
-# 5. Set up dbt virtual environment (first time only)
-python -m venv dbt_venv
-source dbt_venv/bin/activate        # Windows: dbt_venv\Scripts\activate
-pip install dbt-core dbt-snowflake
-
-# 6. Run dbt transformations (local terminal — not inside Docker)
+# 5. Run dbt transformations
 cd src/dbt
 source ../../dbt_venv/bin/activate
-dbt run --profiles-dir . --project-dir .
-dbt test --profiles-dir . --project-dir .
+dbt run
+dbt test
 
-# 7. Ingest news and launch the dashboard
+# 6. Start FastAPI
+cd src
+python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+
+# 7. Ingest news and launch Streamlit
 cd src/rag
-python rag_pipeline.py     # fetches Finnhub news and loads into Pinecone (~2 min)
-streamlit run app.py       # opens dashboard at http://localhost:8501
+python rag_pipeline.py     # fetches Finnhub news → Pinecone (~2 min)
+streamlit run app.py       # opens at http://localhost:8501
 ```
 
 ---
@@ -455,37 +623,33 @@ streamlit run app.py       # opens dashboard at http://localhost:8501
 ## Resume Bullets
 
 ```
-● Built Lambda architecture processing 10 stocks via dual Kafka topics —
-  batch pipeline ingesting 365 days of OHLCV history and a streaming
-  pipeline with 3-minute and 5-minute Spark windowed aggregations stored
-  in Snowflake.
+● Built Lambda architecture on Apache Iceberg + MinIO (HadoopCatalog) processing
+  10 stocks via dual Kafka topics — migrated from plain Parquet to Iceberg for
+  schema evolution, time travel, and ACID transactions on object storage.
 
-● Designed incremental Snowflake loading using MERGE with composite
-  primary keys (symbol + date) for idempotent reruns, alongside
-  Hive-style MinIO partitioning for Spark partition pruning.
+● Designed and deployed a FastAPI REST layer (8 endpoints) between Streamlit
+  and all data sources — Snowflake, Pinecone, and Groq — enforcing separation
+  of concerns, centralising credentials, and enabling per-endpoint caching and
+  rate limiting.
 
-● Built dbt transformation layer with staging views and analytical marts
-  computing SMA-5, SMA-20, and BUY/SELL signals — backed by 27
-  automated data quality tests that fail the pipeline on bad data.
+● Implemented Snowflake RBAC with three-tier role hierarchy (ANALYST_ROLE,
+  PIPELINE_ROLE, READ_ONLY_ROLE) and dynamic column masking policies on price
+  columns — READ_ONLY_ROLE sees 0.0 instead of real prices, enforcing data
+  governance at the warehouse layer.
 
-● Developed RAG-powered market intelligence fetching Finnhub news,
-  embedding 300+ chunks using sentence-transformers stored in Pinecone,
-  and generating grounded answers via Groq Llama3 that explicitly flags
-  conflicts between quantitative signals and news sentiment.
+● Built Medallion architecture for GenAI observability — every RAG query logged
+  to BRONZE (raw events), transformed by dbt to SILVER (cleaned, similarity
+  scores extracted), aggregated to GOLD (daily metrics per symbol) — enabling
+  semantic similarity monitoring to detect Pinecone index degradation.
 
-● Orchestrated via Airflow DAGs with a custom MinIODataSensor validating
-  data landing before Spark runs. CI/CD via GitHub Actions runs 5 jobs
-  including syntax checks, unit tests, and dbt parse on every push.
+● Developed NL2SQL feature converting plain English to validated Snowflake SQL
+  via Groq (temperature=0, schema context, few-shot examples) with SELECT-only
+  enforcement and DML keyword blocking for production safety.
+
+● Implemented few-shot chain-of-thought prompting in the RAG pipeline — structured
+  output (SIGNAL/CONFIDENCE/REASONING/RISK) with explicit conflict flagging when
+  quantitative signals contradict news sentiment, reducing hallucination risk.
 ```
-
----
-
-## Future Enhancements
-
-- **Snowpipe auto-ingestion** — replace Airflow trigger with Snowpipe watching MinIO via webhook for true event-driven loading
-- **Near-realtime dbt** — run dbt every 15 minutes on `REALTIME_STOCK` so RAG answers incorporate short-term momentum alongside daily trends
-- **Unified RAG context** — inject both `STOCK_PERFORMANCE` (daily SMA) and `REALTIME_STOCK` (3-min MA) into the prompt with explicit timestamp labelling so the model can reason about momentum across timeframes
-- **Anomaly detection** — flag unusual price movements via Z-score alerts through Airflow email notifications
 
 ---
 
