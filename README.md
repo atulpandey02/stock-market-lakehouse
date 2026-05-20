@@ -235,7 +235,7 @@ Safety: Temperature=0 for deterministic generation, SELECT-only validation, bloc
   <table>
     <tr>
       <td align="center" width="50%">
-        <img src="docs/image/Batch_aiflow_dag.png" width="100%" alt="Batch DAG"/>
+        <img src="docs/image/Batch_airflow_dag.png" width="100%" alt="Batch DAG"/>
         <br/><sub><b>Batch pipeline — all 6 tasks green</b></sub>
       </td>
       <td align="center" width="50%">
