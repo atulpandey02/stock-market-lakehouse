@@ -620,39 +620,6 @@ streamlit run app.py       # opens at http://localhost:8501
 
 ---
 
-## Resume Bullets
-
-```
-● Built Lambda architecture on Apache Iceberg + MinIO (HadoopCatalog) processing
-  10 stocks via dual Kafka topics — migrated from plain Parquet to Iceberg for
-  schema evolution, time travel, and ACID transactions on object storage.
-
-● Designed and deployed a FastAPI REST layer (8 endpoints) between Streamlit
-  and all data sources — Snowflake, Pinecone, and Groq — enforcing separation
-  of concerns, centralising credentials, and enabling per-endpoint caching and
-  rate limiting.
-
-● Implemented Snowflake RBAC with three-tier role hierarchy (ANALYST_ROLE,
-  PIPELINE_ROLE, READ_ONLY_ROLE) and dynamic column masking policies on price
-  columns — READ_ONLY_ROLE sees 0.0 instead of real prices, enforcing data
-  governance at the warehouse layer.
-
-● Built Medallion architecture for GenAI observability — every RAG query logged
-  to BRONZE (raw events), transformed by dbt to SILVER (cleaned, similarity
-  scores extracted), aggregated to GOLD (daily metrics per symbol) — enabling
-  semantic similarity monitoring to detect Pinecone index degradation.
-
-● Developed NL2SQL feature converting plain English to validated Snowflake SQL
-  via Groq (temperature=0, schema context, few-shot examples) with SELECT-only
-  enforcement and DML keyword blocking for production safety.
-
-● Implemented few-shot chain-of-thought prompting in the RAG pipeline — structured
-  output (SIGNAL/CONFIDENCE/REASONING/RISK) with explicit conflict flagging when
-  quantitative signals contradict news sentiment, reducing hallucination risk.
-```
-
----
-
 <div align="center">
 
 **Atul Kumar Pandey**
